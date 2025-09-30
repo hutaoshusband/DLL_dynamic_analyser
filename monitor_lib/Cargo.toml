@@ -1,0 +1,14 @@
+[package]
+name = "monitor_lib"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+log = { workspace = true }
+simple_logger = { workspace = true }
+widestring = { workspace = true }
+retour = { workspace = true }
+windows-sys = { workspace = true }

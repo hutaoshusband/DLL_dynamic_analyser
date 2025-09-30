@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "cs2_creator",
+    "monitor_lib",
+]
+
+# Centralize shared dependency versions here
+[workspace.dependencies]
+log = "0.4.21"
+simple_logger = "4.3.3"
+widestring = "0.5.1"
+retour = { version = "0.4.0-alpha.4", features = ["static-detour"] }
+
+# Define a single, unified version of windows-sys for the entire workspace
+windows-sys = { version = "0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_Security", # <-- Add this line
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_SystemInformation",
+] }
