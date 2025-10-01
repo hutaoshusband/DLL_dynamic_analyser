@@ -12,3 +12,4 @@ simple_logger = { workspace = true }
 widestring = { workspace = true }
 retour = { workspace = true }
 windows-sys = { workspace = true }
+once_cell = "1.19.0"
