@@ -35,8 +35,9 @@ use windows_sys::Win32::{
         },
         SystemServices::IMAGE_DOS_HEADER,
         Threading::{
-            CreateRemoteThread, OpenProcess, PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION,
-            PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+            CreateRemoteThread, OpenProcess, WaitForSingleObject, PROCESS_CREATE_THREAD,
+            PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+            PROCESS_SYNCHRONIZE,
         },
     },
 };
@@ -451,14 +452,33 @@ fn _run_analysis_internal() {
     start_pipe_server(pid);
 
     match inject_dll(pid, dll_path.to_str().unwrap()) {
-        Ok(_) => info!(
-            "Monitor-DLL '{}' erfolgreich injiziert. Warte auf Logs...",
-            dll_path.display()
-        ),
+        Ok(_) => {
+            info!(
+                "Monitor-DLL '{}' erfolgreich injiziert. Überwachung aktiv.",
+                dll_path.display()
+            );
+            info!("Warte darauf, dass der Zielprozess beendet wird...");
+
+            // Öffne ein Handle zum Prozess, um auf sein Ende warten zu können.
+            let process_handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if process_handle != 0 {
+                unsafe {
+                    // Warte unendlich lange, bis der Prozess terminiert.
+                    WaitForSingleObject(process_handle, u32::MAX);
+                    CloseHandle(process_handle);
+                }
+                info!("Zielprozess wurde beendet.");
+            } else {
+                warn!(
+                    "Konnte kein Handle zum Warten auf den Prozess erstellen. Fehler: {}",
+                    unsafe { GetLastError() }
+                );
+            }
+        }
         Err(e) => warn!("Fehler beim Injizieren der Monitor-DLL: {}", e),
     }
 
-    info!("--- Analyse beendet ---");
+    info!("--- Analyse abgeschlossen ---");
 }
 
 /// Startet einen Named-Pipe-Server in einem neuen Thread, um auf Log-Nachrichten von der injizierten DLL zu lauschen.
