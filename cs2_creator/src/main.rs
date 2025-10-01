@@ -451,6 +451,9 @@ fn _run_analysis_internal() {
     // Starte den Pipe-Server, um auf Logs von der DLL zu lauschen.
     start_pipe_server(pid);
 
+    info!("Warte kurz, damit der Pipe-Server bereit ist...");
+thread::sleep(std::time::Duration::from_millis(500)); 
+
     match inject_dll(pid, dll_path.to_str().unwrap()) {
         Ok(_) => {
             info!(
@@ -563,17 +566,38 @@ fn start_pipe_server(pid: u32) {
 }
 
 fn main() {
+    // Erstelle die Log-Datei. Sie wird leer bleiben, aber ihre Existenz zeigt,
+    // dass das Programm gestartet wurde.
+    if File::create("cs2_runner.log").is_err() {
+        // Diese Meldung siehst du nur, wenn du die Konsole aktiv hast.
+        eprintln!("Warnung: Konnte cs2_runner.log nicht erstellen. Prüfe die Berechtigungen.");
+    }
+
+    // Initialisiere den Logger, der in die Konsole schreibt.
+    match SimpleLogger::new().with_level(log::LevelFilter::Info).init() {
+        Ok(_) => (), // Logger ist bereit
+        Err(e) => {
+            eprintln!("Fehler: Logger konnte nicht initialisiert werden: {}", e);
+            return;
+        }
+    }
+
+    // Diese Nachricht wird jetzt in der Konsole erscheinen.
+    log::info!("CS2 Runner by HUTAOSHUSBAND gestartet. Logging zur Konsole ist aktiv.");
+
     // Ein "Event Loop" wird benötigt, damit das Programm auf Klicks reagieren kann
     let event_loop = EventLoopBuilder::new().build().unwrap();
 
-    // --- Tray-Menü erstellen ---
+    // --- Tray-Menü erstellen (korrigiert) ---
     let tray_menu = Menu::new();
     let title_item = MenuItem::new("CS2 Runner by HUTAOSHUSBAND", false, None);
     let scan_item = MenuItem::new("Analyse starten", true, None);
     let exit_item = MenuItem::new("Exit", true, None);
-    tray_menu.append(&title_item);
-    tray_menu.append(&scan_item);
-    tray_menu.append(&exit_item);
+    
+    // Die .unwrap()-Aufrufe wurden entfernt, da sie die Fehler verursacht haben.
+    let _ = tray_menu.append(&title_item);
+    let _ = tray_menu.append(&scan_item);
+    let _ = tray_menu.append(&exit_item);
 
     // Erstellen des eigentlichen Tray-Icons
     let _tray_icon = TrayIconBuilder::new()
@@ -581,15 +605,6 @@ fn main() {
         .with_menu(Box::new(tray_menu))
         .build()
         .unwrap();
-
-    // Initialisiere das Logging in eine Datei
-    if File::create("cs2_runner.log").is_ok() {
-        let _ = SimpleLogger::new()
-            .with_level(log::LevelFilter::Info)
-            .init();
-        info!("CS2 Runner by HUTAOSHUSBAND gestartet. Logging ist aktiv.");
-    } else {
-    }
 
     // Überwachen von Klick-Events auf das Menü
     let menu_channel = MenuEvent::receiver();
@@ -601,10 +616,10 @@ fn main() {
 
             if let Ok(event) = menu_channel.try_recv() {
                 if event.id == scan_item.id() {
-                    info!("'Analyse starten' geklickt. Analyse wird im Hintergrund ausgeführt.");
+                    log::info!("'Analyse starten' geklickt. Analyse wird im Hintergrund ausgeführt.");
                     run_analysis();
                 } else if event.id == exit_item.id() {
-                    info!("Exit-Button geklickt. Starte Analyse vor dem Beenden...");
+                    log::info!("Exit-Button geklickt. Programm wird beendet.");
                     event_loop.exit();
                 }
             }

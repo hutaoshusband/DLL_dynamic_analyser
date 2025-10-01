@@ -3,6 +3,9 @@ name = "cs2_creator"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+embed-resource = "2.2.0"
+
 [dependencies]
 log = { workspace = true }
 simple_logger = { workspace = true }
@@ -10,4 +13,4 @@ windows-sys = { workspace = true, features = ["Win32_System_Threading", "Win32_S
 tray-icon = "0.3.0"
 winit = "0.29.15"
 rfd = "0.14.1"
-tinyfiledialogs = "3.9.1"
+tinyfiledialogs = { version = "3.9.1", default-features = false }

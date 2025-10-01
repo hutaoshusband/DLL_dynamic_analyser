@@ -1,0 +1,6 @@
+// cs2_creator.rc
+// This file tells the resource compiler to embed the manifest.
+// 1: The resource ID for the manifest. Must be 1 for RT_MANIFEST.
+// 24: The resource type for an application manifest (RT_MANIFEST).
+// "cs2_creator.manifest": The path to the manifest file to embed.
+1 24 "cs2_creator.manifest"
