@@ -79,6 +79,28 @@ impl Drop for ReentrancyGuard {
     }
 }
 
+/// A guard to prevent the logging thread from triggering its own hooks.
+struct LoggingWriteGuard;
+
+impl LoggingWriteGuard {
+    /// Enters the guarded section, unconditionally setting the `IN_HOOK` flag.
+    fn new() -> LoggingWriteGuard {
+        IN_HOOK.with(|in_hook| {
+            in_hook.set(true);
+        });
+        LoggingWriteGuard
+    }
+}
+
+impl Drop for LoggingWriteGuard {
+    /// Exits the guarded section.
+    fn drop(&mut self) {
+        IN_HOOK.with(|in_hook| {
+            in_hook.set(false);
+        });
+    }
+}
+
 /// The new central logging function. It's now lightweight and non-blocking.
 /// It sends the event to the logging thread via a channel.
 fn log_event(event: LogEvent) {
@@ -549,6 +571,10 @@ fn logging_thread_main(receiver: Receiver<Option<LogEvent>>) {
 
     // The main logging loop. It will exit when it receives `None` or the sender is dropped.
     while let Ok(Some(event)) = receiver.recv() {
+        // Activate the guard for the duration of this loop iteration.
+        // This prevents our own `WriteFile` calls from being logged.
+        let _guard = LoggingWriteGuard::new();
+
         let log_entry = LogEntry::new(event);
         if let Ok(json_string) = serde_json::to_string(&log_entry) {
             let formatted_message = format!("{}\n", json_string);
