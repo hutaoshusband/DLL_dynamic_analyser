@@ -27,7 +27,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::Networking::WinSock::{
-    inet_ntoa, AF_INET, IN_ADDR, SOCKET, SOCKADDR, SOCKADDR_IN,
+    inet_ntoa, AF_INET, IN_ADDR, SOCKET, SOCKADDR, SOCKADDR_IN, ADDRINFOW, GetAddrInfoW,
 };
 use windows_sys::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY,
@@ -101,6 +101,23 @@ retour::static_detour! {
     static CreateRemoteThreadHook: unsafe extern "system" fn(
         HANDLE, *const SECURITY_ATTRIBUTES, usize, LPTHREAD_START_ROUTINE, *const c_void, THREAD_CREATION_FLAGS, *mut u32
     ) -> HANDLE;
+    static GetAddrInfoWHook: unsafe extern "system" fn(
+        *const u16, *const u16, *const ADDRINFOW, *mut *mut ADDRINFOW
+    ) -> i32;
+}
+
+// Hook für GetAddrInfoW, um DNS-Abfragen zu protokollieren.
+fn hooked_get_addr_info_w(
+    p_node_name: *const u16,
+    p_service_name: *const u16,
+    p_hints: *const ADDRINFOW,
+    pp_result: *mut *mut ADDRINFOW,
+) -> i32 {
+    if !p_node_name.is_null() {
+        let node_name = unsafe { widestring::U16CStr::from_ptr_str(p_node_name).to_string_lossy() };
+        log_message(&format!("[HOOK] GetAddrInfoW (DNS Query) -> Host: '{}'", node_name));
+    }
+    unsafe { GetAddrInfoWHook.call(p_node_name, p_service_name, p_hints, pp_result) }
 }
 
 // Unsere eigene Funktion, die anstelle von MessageBoxW aufgerufen wird.
@@ -468,6 +485,14 @@ fn initialize() {
                 if let Some(addr) = connect_addr {
                     if ConnectHook.initialize(std::mem::transmute(addr), hooked_connect).is_ok() {
                         let _ = ConnectHook.enable();
+                    }
+                }
+
+                // Hook für GetAddrInfoW (DNS)
+                let get_addr_info_addr = GetProcAddress(ws2_32, b"GetAddrInfoW\0".as_ptr());
+                if let Some(addr) = get_addr_info_addr {
+                    if GetAddrInfoWHook.initialize(std::mem::transmute(addr), hooked_get_addr_info_w).is_ok() {
+                        let _ = GetAddrInfoWHook.enable();
                     }
                 }
             }

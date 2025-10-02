@@ -17,6 +17,10 @@ use simple_logger::SimpleLogger;
 use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE},
+    Security::{
+        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR,
+    },
     Storage::FileSystem::{ReadFile, PIPE_ACCESS_INBOUND},
     System::{
         Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory, IMAGE_NT_HEADERS64},
@@ -492,6 +496,17 @@ fn start_pipe_server(pid: u32) {
         let wide_pipe_name: Vec<u16> =
             pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
 
+        // Erstelle einen Security Descriptor, der jedem den Zugriff erlaubt.
+        // Das ist nötig, weil der Creator als Admin läuft, der Zielprozess aber nicht.
+        let mut sa: SECURITY_ATTRIBUTES = std::mem::zeroed();
+        let mut sd: SECURITY_DESCRIPTOR = std::mem::zeroed();
+        InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1);
+        // Ein NULL DACL erlaubt allen Zugriff.
+        SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, std::ptr::null_mut(), 0);
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.lpSecurityDescriptor = &mut sd as *mut _ as *mut _;
+        sa.bInheritHandle = 0;
+
         loop {
             // Erstelle die Named Pipe.
             let pipe_handle = CreateNamedPipeW(
@@ -502,7 +517,7 @@ fn start_pipe_server(pid: u32) {
                 512,  // output buffer size
                 4096, // input buffer size
                 0,    // default time-out
-                std::ptr::null(),
+                &sa,
             );
 
             if pipe_handle == INVALID_HANDLE_VALUE {
