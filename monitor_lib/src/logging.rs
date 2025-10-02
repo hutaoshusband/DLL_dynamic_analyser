@@ -1,17 +1,22 @@
+use crate::config::{LogLevel, CONFIG};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::ffi::c_void;
 use windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
-// The maximum number of stack frames to capture.
-const MAX_STACK_FRAMES: usize = 64;
-
 /// Captures the current call stack, returning a vector of function addresses.
-pub fn capture_stack_trace() -> Vec<String> {
-    let mut back_trace: [*mut c_void; MAX_STACK_FRAMES] = [std::ptr::null_mut(); MAX_STACK_FRAMES];
+pub fn capture_stack_trace(max_frames: usize) -> Vec<String> {
+    let mut back_trace: Vec<*mut c_void> = vec![std::ptr::null_mut(); max_frames];
     // We skip the first frame, which is this function itself.
-    let frames = unsafe { RtlCaptureStackBackTrace(1, MAX_STACK_FRAMES as u32, back_trace.as_mut_ptr(), std::ptr::null_mut()) };
+    let frames = unsafe {
+        RtlCaptureStackBackTrace(
+            1,
+            max_frames as u32,
+            back_trace.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    };
 
     (0..frames)
         .map(|i| format!("{:#x}", back_trace[i as usize] as usize))
@@ -23,23 +28,39 @@ pub fn capture_stack_trace() -> Vec<String> {
 pub struct LogEntry {
     #[serde(with = "chrono::serde::ts_seconds")]
     pub timestamp: DateTime<Utc>,
+    pub level: LogLevel,
     pub process_id: u32,
     pub thread_id: u32,
     #[serde(flatten)]
     pub event: LogEvent,
-    pub stack_trace: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_trace: Option<Vec<String>>,
 }
 
 impl LogEntry {
     /// Creates a new LogEntry for a given event, automatically capturing
-    /// the timestamp, process ID, thread ID, and stack trace.
-    pub fn new(event: LogEvent) -> Self {
+    /// the timestamp, process ID, and thread ID. The stack trace is captured
+    /// conditionally based on the global configuration and the event's log level.
+    pub fn new(level: LogLevel, event: LogEvent) -> Self {
+        let should_capture_stack = if CONFIG.stack_trace_on_error_only {
+            level == LogLevel::Error
+        } else {
+            true // Capture if the setting is disabled
+        };
+
+        let stack_trace = if should_capture_stack {
+            Some(capture_stack_trace(CONFIG.stack_trace_frame_limit))
+        } else {
+            None
+        };
+
         Self {
             timestamp: Utc::now(),
+            level,
             process_id: unsafe { GetCurrentProcessId() },
             thread_id: unsafe { GetCurrentThreadId() },
             event,
-            stack_trace: capture_stack_trace(),
+            stack_trace,
         }
     }
 }

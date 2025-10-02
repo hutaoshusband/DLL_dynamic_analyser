@@ -398,7 +398,7 @@ fn _run_analysis_internal() {
 
     let target_input = match tinyfiledialogs::input_box(
         "Prozess auswählen",
-        "Bitte geben Sie den Namen oder die PID des Zielprozesses ein.\n(Eine Liste finden Sie in der cs2_runner.log)",
+        "Bitte gib den Namen oder die PID des Zielprozesses ein.\n(Eine Liste ist in der cs2_runner.log) Ich werde das noch umbenennen keine Sorge.",
         "",
     ) {
         Some(input) if !input.is_empty() => input,
@@ -581,12 +581,6 @@ fn start_pipe_server(pid: u32) {
 }
 
 fn main() {
-    // Erstelle die Log-Datei. Sie wird leer bleiben, aber ihre Existenz zeigt,
-    // dass das Programm gestartet wurde.
-    if File::create("cs2_runner.log").is_err() {
-        // Diese Meldung siehst du nur, wenn du die Konsole aktiv hast.
-        eprintln!("Warnung: Konnte cs2_runner.log nicht erstellen. Prüfe die Berechtigungen.");
-    }
 
     // Initialisiere den Logger, der in die Konsole schreibt.
     match SimpleLogger::new().with_level(log::LevelFilter::Info).init() {
@@ -598,14 +592,14 @@ fn main() {
     }
 
     // Diese Nachricht wird jetzt in der Konsole erscheinen.
-    log::info!("CS2 Runner by HUTAOSHUSBAND gestartet. Logging zur Konsole ist aktiv.");
+    log::info!("DLL Dynamic Analyzer by HUTAOSHUSBAND gestartet. Logging zur Konsole ist aktiv.");
 
     // Ein "Event Loop" wird benötigt, damit das Programm auf Klicks reagieren kann
     let event_loop = EventLoopBuilder::new().build().unwrap();
 
     // --- Tray-Menü erstellen (korrigiert) ---
     let tray_menu = Menu::new();
-    let title_item = MenuItem::new("CS2 Runner by HUTAOSHUSBAND", false, None);
+    let title_item = MenuItem::new("DLL Analyzer by HUTAOSHUSBAND", false, None);
     let scan_item = MenuItem::new("Analyse starten", true, None);
     let exit_item = MenuItem::new("Exit", true, None);
     
@@ -616,7 +610,7 @@ fn main() {
 
     // Erstellen des eigentlichen Tray-Icons
     let _tray_icon = TrayIconBuilder::new()
-        .with_tooltip("CS2 Runner by HUTAOSHUSBAND")
+        .with_tooltip("DLL Analyzer by HUTAOSHUSBAND")
         .with_menu(Box::new(tray_menu))
         .build()
         .unwrap();
