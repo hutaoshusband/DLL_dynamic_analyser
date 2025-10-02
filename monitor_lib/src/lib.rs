@@ -1,4 +1,7 @@
 #![cfg(windows)]
+// Include the new logging module
+mod logging;
+
 use std::ffi::{c_void, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -7,10 +10,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 use once_cell::sync::OnceCell;
+use serde_json::json;
 
+// Use the new logging structures
+use logging::{LogEntry, LogEvent};
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, INVALID_HANDLE_VALUE, HWND};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-use windows_sys::Win32::System::LibraryLoader::{LoadLibraryExW, LoadLibraryW, GetProcAddress};
+use windows_sys::Win32::System::LibraryLoader::{LoadLibraryExW, LoadLibraryW, GetProcAddress, GetModuleHandleW};
 use windows_sys::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, ReadProcessMemory};
 use windows_sys::Win32::System::Memory::{
     VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_EXECUTE_READ,
@@ -27,7 +33,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::Networking::WinSock::{
-    inet_ntoa, AF_INET, IN_ADDR, SOCKET, SOCKADDR, SOCKADDR_IN, ADDRINFOW, GetAddrInfoW,
+    inet_ntoa, AF_INET, IN_ADDR, SOCKET, SOCKADDR, SOCKADDR_IN, ADDRINFOW,
 };
 use windows_sys::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY,
@@ -43,31 +49,36 @@ struct MonitorLogger {
     pipe: Option<HANDLE>,
 }
 
-/// Die zentrale Logging-Funktion. Schreibt eine Nachricht in die Log-Datei und an die Pipe.
-fn log_message(message: &str) {
+/// Die zentrale Logging-Funktion. Serialisiert ein LogEvent und schreibt es als JSON.
+fn log_event(event: LogEvent) {
     if let Some(logger_mutex) = LOGGER.get() {
         let mut logger = logger_mutex.lock().unwrap();
-        let formatted_message = format!("{}\n", message);
-        let bytes = formatted_message.as_bytes();
+        let log_entry = LogEntry::new(event);
 
-        // In die Datei schreiben.
-        if let Some(file) = logger.log_file.as_mut() {
-            let _ = file.write_all(bytes);
-            let _ = file.flush();
-        }
+        // Versuche, den Log-Eintrag in JSON zu serialisieren.
+        if let Ok(json_string) = serde_json::to_string(&log_entry) {
+            let formatted_message = format!("{}\n", json_string);
+            let bytes = formatted_message.as_bytes();
 
-        // An die Pipe senden.
-        if let Some(pipe_handle) = logger.pipe {
-            if pipe_handle != INVALID_HANDLE_VALUE {
-                let mut bytes_written = 0;
-                unsafe {
-                    WriteFile(
-                        pipe_handle,
-                        bytes.as_ptr(),
-                        bytes.len() as u32,
-                        &mut bytes_written,
-                        std::ptr::null_mut(),
-                    );
+            // In die Datei schreiben.
+            if let Some(file) = logger.log_file.as_mut() {
+                let _ = file.write_all(bytes);
+                let _ = file.flush();
+            }
+
+            // An die Pipe senden.
+            if let Some(pipe_handle) = logger.pipe {
+                if pipe_handle != INVALID_HANDLE_VALUE {
+                    let mut bytes_written = 0;
+                    unsafe {
+                        WriteFile(
+                            pipe_handle,
+                            bytes.as_ptr(),
+                            bytes.len() as u32,
+                            &mut bytes_written,
+                            std::ptr::null_mut(),
+                        );
+                    }
                 }
             }
         }
@@ -106,6 +117,15 @@ retour::static_detour! {
     ) -> i32;
 }
 
+// Safely converts a null-terminated wide string pointer to a String.
+fn safe_u16_str(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        "<NULL>".to_string()
+    } else {
+        unsafe { widestring::U16CStr::from_ptr_str(ptr).to_string_lossy() }
+    }
+}
+
 // Hook für GetAddrInfoW, um DNS-Abfragen zu protokollieren.
 fn hooked_get_addr_info_w(
     p_node_name: *const u16,
@@ -113,18 +133,23 @@ fn hooked_get_addr_info_w(
     p_hints: *const ADDRINFOW,
     pp_result: *mut *mut ADDRINFOW,
 ) -> i32 {
-    if !p_node_name.is_null() {
-        let node_name = unsafe { widestring::U16CStr::from_ptr_str(p_node_name).to_string_lossy() };
-        log_message(&format!("[HOOK] GetAddrInfoW (DNS Query) -> Host: '{}'", node_name));
-    }
+    let node_name = safe_u16_str(p_node_name);
+    let service_name = safe_u16_str(p_service_name);
+    log_event(LogEvent::ApiHook {
+        function_name: "GetAddrInfoW".to_string(),
+        parameters: json!({ "node_name": node_name, "service_name": service_name }),
+    });
     unsafe { GetAddrInfoWHook.call(p_node_name, p_service_name, p_hints, pp_result) }
 }
 
 // Unsere eigene Funktion, die anstelle von MessageBoxW aufgerufen wird.
 fn hooked_message_box_w(h_wnd: HWND, text: *const u16, caption: *const u16, u_type: u32) -> i32 {
-    let text_str = unsafe { widestring::U16CStr::from_ptr_str(text).to_string_lossy() };
-    let caption_str = unsafe { widestring::U16CStr::from_ptr_str(caption).to_string_lossy() };
-    log_message(&format!("[HOOK] MessageBoxW -> Titel: '{}', Text: '{}'", caption_str, text_str));
+    let text_str = safe_u16_str(text);
+    let caption_str = safe_u16_str(caption);
+    log_event(LogEvent::ApiHook {
+        function_name: "MessageBoxW".to_string(),
+        parameters: json!({ "title": caption_str, "text": text_str, "type": u_type }),
+    });
     unsafe { MessageBoxWHook.call(h_wnd, text, caption, u_type) }
 }
 
@@ -138,8 +163,11 @@ fn hooked_create_file_w(
     dw_flags_and_attributes: u32,
     h_template_file: HANDLE,
 ) -> HANDLE {
-    let file_name_str = unsafe { widestring::U16CStr::from_ptr_str(lp_file_name).to_string_lossy() };
-    log_message(&format!("[HOOK] CreateFileW -> Datei: '{}'", file_name_str));
+    let file_name_str = safe_u16_str(lp_file_name);
+    log_event(LogEvent::ApiHook {
+        function_name: "CreateFileW".to_string(),
+        parameters: json!({ "file_name": file_name_str, "access": dw_desired_access, "disposition": dw_creation_disposition }),
+    });
     unsafe {
         CreateFileWHook.call(
             lp_file_name, dw_desired_access, dw_share_mode, lp_security_attributes,
@@ -156,7 +184,6 @@ fn hooked_connect(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
             let ip_addr_long = unsafe { sockaddr_in.sin_addr.S_un.S_addr };
             let port = u16::from_be(sockaddr_in.sin_port);
             
-            // Konvertiere die IP-Adresse in einen String.
             let ip_str = unsafe {
                 let addr = IN_ADDR { S_un: std::mem::transmute([ip_addr_long]) };
                 let c_str = inet_ntoa(addr);
@@ -167,7 +194,10 @@ fn hooked_connect(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
                 }
             };
             
-            log_message(&format!("[HOOK] connect -> Ziel: {}:{}", ip_str, port));
+            log_event(LogEvent::ApiHook {
+                function_name: "connect".to_string(),
+                parameters: json!({ "target_ip": ip_str, "port": port }),
+            });
         }
     }
     unsafe { ConnectHook.call(s, name, namelen) }
@@ -175,7 +205,6 @@ fn hooked_connect(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
 
 // Hilfsfunktion zur Konvertierung von HKEY in einen lesbaren String.
 fn hkey_to_string(hkey: HKEY) -> String {
-    // Diese Konstanten sind in windows-sys definiert, aber als isize.
     const HKEY_CLASSES_ROOT_VAL: isize = 0x80000000;
     const HKEY_CURRENT_USER_VAL: isize = 0x80000001;
     const HKEY_LOCAL_MACHINE_VAL: isize = 0x80000002;
@@ -186,7 +215,7 @@ fn hkey_to_string(hkey: HKEY) -> String {
         HKEY_CURRENT_USER_VAL => "HKEY_CURRENT_USER".to_string(),
         HKEY_LOCAL_MACHINE_VAL => "HKEY_LOCAL_MACHINE".to_string(),
         HKEY_USERS_VAL => "HKEY_USERS".to_string(),
-        _ => format!("Unbekannter HKEY ({:?})", hkey),
+        _ => format!("Unknown HKEY ({:?})", hkey),
     }
 }
 
@@ -202,8 +231,11 @@ fn hooked_reg_create_key_ex_w(
     phk_result: *mut HKEY,
     lpdw_disposition: *mut u32,
 ) -> u32 {
-    let sub_key = unsafe { widestring::U16CStr::from_ptr_str(lp_sub_key).to_string_lossy() };
-    log_message(&format!("[HOOK] RegCreateKeyExW -> Pfad: {}\\{}", hkey_to_string(hkey), sub_key));
+    let sub_key = safe_u16_str(lp_sub_key);
+    log_event(LogEvent::ApiHook {
+        function_name: "RegCreateKeyExW".to_string(),
+        parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
+    });
     unsafe {
         RegCreateKeyExWHook.call(
             hkey, lp_sub_key, _reserved, lp_class, dw_options, sam_desired,
@@ -214,7 +246,10 @@ fn hooked_reg_create_key_ex_w(
 
 /// Sucht im Speicher des aktuellen Prozesses nach Anzeichen von "Manual Mapping".
 fn scan_for_manual_mapping() {
-    log_message("[SCAN] Starte periodischen Speicher-Scan auf Manual Mapping.");
+    log_event(LogEvent::MemoryScan {
+        status: "Starting periodic scan for manual mapping.".to_string(),
+        result: "".to_string(),
+    });
     unsafe {
         let process_handle = GetCurrentProcess();
         let mut current_address: usize = 0;
@@ -228,12 +263,9 @@ fn scan_for_manual_mapping() {
                 std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
             );
 
-            if result == 0 {
-                break; // Ende des Speicher-Scans
-            }
+            if result == 0 { break; }
 
-            let is_private_committed =
-                mem_info.State == MEM_COMMIT && mem_info.Type == MEM_PRIVATE;
+            let is_private_committed = mem_info.State == MEM_COMMIT && mem_info.Type == MEM_PRIVATE;
             let is_executable = (mem_info.Protect & PAGE_EXECUTE_READ) != 0
                 || (mem_info.Protect & PAGE_EXECUTE_READWRITE) != 0
                 || (mem_info.Protect & PAGE_EXECUTE_WRITECOPY) != 0;
@@ -248,12 +280,8 @@ fn scan_for_manual_mapping() {
                     &mut dos_header as *mut _ as *mut _,
                     std::mem::size_of::<IMAGE_DOS_HEADER>(),
                     &mut bytes_read,
-                ) != 0
-                    && bytes_read > 0
-                    && dos_header.e_magic == 0x5A4D // Überprüft auf "MZ"
-                {
-                    let nt_header_address =
-                        (mem_info.BaseAddress as usize + dos_header.e_lfanew as usize) as *const _;
+                ) != 0 && dos_header.e_magic == 0x5A4D { // Check for "MZ"
+                    let nt_header_address = (mem_info.BaseAddress as usize + dos_header.e_lfanew as usize) as *const _;
                     let mut nt_headers: IMAGE_NT_HEADERS64 = std::mem::zeroed();
 
                     if ReadProcessMemory(
@@ -262,21 +290,21 @@ fn scan_for_manual_mapping() {
                         &mut nt_headers as *mut _ as *mut _,
                         std::mem::size_of::<IMAGE_NT_HEADERS64>(),
                         &mut bytes_read,
-                    ) != 0
-                        && bytes_read > 0
-                        && nt_headers.Signature == 0x4550 // Überprüft auf "PE"
-                    {
-                        log_message(&format!(
-                            "[ALERT] Potenziell manuell gemapptes Image an Adresse: {:#X} gefunden!",
-                            mem_info.BaseAddress as usize
-                        ));
+                    ) != 0 && nt_headers.Signature == 0x4550 { // Check for "PE"
+                        log_event(LogEvent::MemoryScan {
+                            status: "Potential manually mapped image found!".to_string(),
+                            result: format!("Address: {:#X}", mem_info.BaseAddress as usize),
+                        });
                     }
                 }
             }
             current_address = mem_info.BaseAddress as usize + mem_info.RegionSize;
         }
     }
-    log_message("[SCAN] Speicher-Scan abgeschlossen.");
+    log_event(LogEvent::MemoryScan {
+        status: "Memory scan finished.".to_string(),
+        result: "".to_string(),
+    });
 }
 
 // Hook für RegSetValueExW
@@ -288,11 +316,11 @@ fn hooked_reg_set_value_ex_w(
     lp_data: *const u8,
     cb_data: u32,
 ) -> u32 {
-    let value_name = unsafe { widestring::U16CStr::from_ptr_str(lp_value_name).to_string_lossy() };
-    log_message(&format!(
-        "[HOOK] RegSetValueExW -> Schlüssel: {}, Wert: '{}', Typ: {}, Bytes: {}",
-        hkey_to_string(hkey), value_name, dw_type, cb_data
-    ));
+    let value_name = safe_u16_str(lp_value_name);
+    log_event(LogEvent::ApiHook {
+        function_name: "RegSetValueExW".to_string(),
+        parameters: json!({ "key": hkey_to_string(hkey), "value_name": value_name, "type": dw_type, "bytes": cb_data }),
+    });
     unsafe {
         RegSetValueExWHook.call(hkey, lp_value_name, _reserved, dw_type, lp_data, cb_data)
     }
@@ -300,15 +328,21 @@ fn hooked_reg_set_value_ex_w(
 
 // Hook für RegDeleteKeyW
 fn hooked_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u16) -> u32 {
-    let sub_key = unsafe { widestring::U16CStr::from_ptr_str(lp_sub_key).to_string_lossy() };
-    log_message(&format!("[HOOK] RegDeleteKeyW -> Pfad: {}\\{}", hkey_to_string(hkey), sub_key));
+    let sub_key = safe_u16_str(lp_sub_key);
+    log_event(LogEvent::ApiHook {
+        function_name: "RegDeleteKeyW".to_string(),
+        parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
+    });
     unsafe { RegDeleteKeyWHook.call(hkey, lp_sub_key) }
 }
 
 // Hook für DeleteFileW
 fn hooked_delete_file_w(lp_file_name: *const u16) -> BOOL {
-    let file_name = unsafe { widestring::U16CStr::from_ptr_str(lp_file_name).to_string_lossy() };
-    log_message(&format!("[HOOK] DeleteFileW -> Datei: '{}'", file_name));
+    let file_name = safe_u16_str(lp_file_name);
+    log_event(LogEvent::ApiHook {
+        function_name: "DeleteFileW".to_string(),
+        parameters: json!({ "file_name": file_name }),
+    });
     unsafe { DeleteFileWHook.call(lp_file_name) }
 }
 
@@ -322,10 +356,11 @@ fn hooked_create_remote_thread(
     dw_creation_flags: THREAD_CREATION_FLAGS,
     lp_thread_id: *mut u32,
 ) -> HANDLE {
-    log_message(&format!(
-        "[HOOK] CreateRemoteThread -> Zielprozess-Handle: {:?}, Startadresse: {:?}",
-        h_process, lp_start_address
-    ));
+    let start_address_val = lp_start_address.map_or(0, |f| f as usize);
+    log_event(LogEvent::ApiHook {
+        function_name: "CreateRemoteThread".to_string(),
+        parameters: json!({ "target_process_handle": h_process, "start_address": start_address_val }),
+    });
     unsafe {
         CreateRemoteThreadHook.call(
             h_process, lp_thread_attributes, dw_stack_size, lp_start_address,
@@ -336,15 +371,21 @@ fn hooked_create_remote_thread(
 
 // Hook für LoadLibraryW
 fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
-    let lib_name = unsafe { widestring::U16CStr::from_ptr_str(lp_lib_file_name).to_string_lossy() };
-    log_message(&format!("[HOOK] LoadLibraryW -> Library: '{}'", lib_name));
+    let lib_name = safe_u16_str(lp_lib_file_name);
+    log_event(LogEvent::ApiHook {
+        function_name: "LoadLibraryW".to_string(),
+        parameters: json!({ "library_name": lib_name }),
+    });
     unsafe { LoadLibraryWHook.call(lp_lib_file_name) }
 }
 
 // Hook für LoadLibraryExW
 fn hooked_load_library_ex_w(lp_lib_file_name: *const u16, h_file: HANDLE, dw_flags: u32) -> HINSTANCE {
-    let lib_name = unsafe { widestring::U16CStr::from_ptr_str(lp_lib_file_name).to_string_lossy() };
-    log_message(&format!("[HOOK] LoadLibraryExW -> Library: '{}', Flags: {:#X}", lib_name, dw_flags));
+    let lib_name = safe_u16_str(lp_lib_file_name);
+    log_event(LogEvent::ApiHook {
+        function_name: "LoadLibraryExW".to_string(),
+        parameters: json!({ "library_name": lib_name, "flags": dw_flags }),
+    });
     unsafe { LoadLibraryExWHook.call(lp_lib_file_name, h_file, dw_flags) }
 }
 
@@ -357,19 +398,17 @@ fn hooked_write_file(
     lp_overlapped: *mut OVERLAPPED,
 ) -> BOOL {
     let mut file_path_buf = vec![0u16; 1024];
-    let path_len = unsafe {
-        GetFinalPathNameByHandleW(h_file, file_path_buf.as_mut_ptr(), file_path_buf.len() as u32, 0)
-    };
+    let path_len = unsafe { GetFinalPathNameByHandleW(h_file, file_path_buf.as_mut_ptr(), file_path_buf.len() as u32, 0) };
     let file_name = if path_len > 0 {
         OsString::from_wide(&file_path_buf[..path_len as usize]).to_string_lossy().to_string()
     } else {
-        "Unbekannter Handle".to_string()
+        "Unknown Handle".to_string()
     };
 
-    log_message(&format!(
-        "[HOOK] WriteFile -> Datei: '{}', Bytes: {}",
-        file_name, n_number_of_bytes_to_write
-    ));
+    log_event(LogEvent::ApiHook {
+        function_name: "WriteFile".to_string(),
+        parameters: json!({ "file_name": file_name, "bytes_to_write": n_number_of_bytes_to_write }),
+    });
 
     unsafe {
         WriteFileHook.call(h_file, lp_buffer, n_number_of_bytes_to_write, lp_number_of_bytes_written, lp_overlapped)
@@ -389,10 +428,13 @@ fn hooked_create_process_w(
     lp_startup_info: *const STARTUPINFOW,
     lp_process_information: *mut PROCESS_INFORMATION,
 ) -> BOOL {
-    let app_name = if lp_application_name.is_null() { "N/A".to_string() } else { unsafe { widestring::U16CStr::from_ptr_str(lp_application_name).to_string_lossy().to_string() } };
-    let cmd_line = if lp_command_line.is_null() { "N/A".to_string() } else { unsafe { widestring::U16CStr::from_ptr_str(lp_command_line).to_string_lossy().to_string() } };
+    let app_name = safe_u16_str(lp_application_name);
+    let cmd_line = safe_u16_str(lp_command_line);
     
-    log_message(&format!("[HOOK] CreateProcessW -> App: '{}', Kommandozeile: '{}'", app_name, cmd_line));
+    log_event(LogEvent::ApiHook {
+        function_name: "CreateProcessW".to_string(),
+        parameters: json!({ "application_name": app_name, "command_line": cmd_line }),
+    });
     
     unsafe {
         CreateProcessWHook.call(
@@ -422,9 +464,7 @@ fn initialize() {
                 0,
             )
         };
-        if pipe_handle != INVALID_HANDLE_VALUE {
-            break;
-        }
+        if pipe_handle != INVALID_HANDLE_VALUE { break; }
         unsafe { Sleep(500) };
     }
 
@@ -455,79 +495,80 @@ fn initialize() {
 
     let logger = MonitorLogger { log_file, pipe: Some(pipe_handle) };
     if LOGGER.set(Mutex::new(logger)).is_ok() {
-        log_message("[INIT] Monitor-DLL erfolgreich initialisiert.");
+        log_event(LogEvent::Initialization { status: "Monitor DLL initialized successfully.".to_string() });
 
         unsafe {
-            if MessageBoxWHook.initialize(MessageBoxW, hooked_message_box_w).is_ok() {
-                let _ = MessageBoxWHook.enable();
-            }
-            if CreateFileWHook.initialize(CreateFileW, hooked_create_file_w).is_ok() {
-                let _ = CreateFileWHook.enable();
-            }
-            if WriteFileHook.initialize(WriteFile, hooked_write_file).is_ok() {
-                let _ = WriteFileHook.enable();
-            }
-            if CreateProcessWHook.initialize(CreateProcessW, hooked_create_process_w).is_ok() {
-                let _ = CreateProcessWHook.enable();
-            }
-            if LoadLibraryWHook.initialize(LoadLibraryW, hooked_load_library_w).is_ok() {
-                let _ = LoadLibraryWHook.enable();
-            }
-            if LoadLibraryExWHook.initialize(LoadLibraryExW, hooked_load_library_ex_w).is_ok() {
-                let _ = LoadLibraryExWHook.enable();
-            }
+            if MessageBoxWHook.initialize(MessageBoxW, hooked_message_box_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook MessageBoxW".to_string() });
+            } else { let _ = MessageBoxWHook.enable(); }
+
+            if CreateFileWHook.initialize(CreateFileW, hooked_create_file_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook CreateFileW".to_string() });
+            } else { let _ = CreateFileWHook.enable(); }
+
+            if WriteFileHook.initialize(WriteFile, hooked_write_file).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook WriteFile".to_string() });
+            } else { let _ = WriteFileHook.enable(); }
+
+            if CreateProcessWHook.initialize(CreateProcessW, hooked_create_process_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook CreateProcessW".to_string() });
+            } else { let _ = CreateProcessWHook.enable(); }
+
+            if LoadLibraryWHook.initialize(LoadLibraryW, hooked_load_library_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook LoadLibraryW".to_string() });
+            } else { let _ = LoadLibraryWHook.enable(); }
+
+            if LoadLibraryExWHook.initialize(LoadLibraryExW, hooked_load_library_ex_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook LoadLibraryExW".to_string() });
+            } else { let _ = LoadLibraryExWHook.enable(); }
             
-            // Hook für connect (aus ws2_32.dll)
             let ws2_32_name: Vec<u16> = "ws2_32.dll".encode_utf16().chain(std::iter::once(0)).collect();
-            let ws2_32 = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(ws2_32_name.as_ptr());
+            let ws2_32 = GetModuleHandleW(ws2_32_name.as_ptr());
             if ws2_32 != 0 {
                 let connect_addr = GetProcAddress(ws2_32, b"connect\0".as_ptr());
                 if let Some(addr) = connect_addr {
-                    if ConnectHook.initialize(std::mem::transmute(addr), hooked_connect).is_ok() {
-                        let _ = ConnectHook.enable();
-                    }
+                    if ConnectHook.initialize(std::mem::transmute(addr), hooked_connect).is_err() {
+                        log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook connect".to_string() });
+                    } else { let _ = ConnectHook.enable(); }
                 }
 
-                // Hook für GetAddrInfoW (DNS)
                 let get_addr_info_addr = GetProcAddress(ws2_32, b"GetAddrInfoW\0".as_ptr());
                 if let Some(addr) = get_addr_info_addr {
-                    if GetAddrInfoWHook.initialize(std::mem::transmute(addr), hooked_get_addr_info_w).is_ok() {
-                        let _ = GetAddrInfoWHook.enable();
-                    }
+                    if GetAddrInfoWHook.initialize(std::mem::transmute(addr), hooked_get_addr_info_w).is_err() {
+                        log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook GetAddrInfoW".to_string() });
+                    } else { let _ = GetAddrInfoWHook.enable(); }
                 }
             }
 
-            // Registry Hooks
-            if RegCreateKeyExWHook.initialize(RegCreateKeyExW, hooked_reg_create_key_ex_w).is_ok() {
-                let _ = RegCreateKeyExWHook.enable();
-            }
-            if RegSetValueExWHook.initialize(RegSetValueExW, hooked_reg_set_value_ex_w).is_ok() {
-                let _ = RegSetValueExWHook.enable();
-            }
-            if RegDeleteKeyWHook.initialize(RegDeleteKeyW, hooked_reg_delete_key_w).is_ok() {
-                let _ = RegDeleteKeyWHook.enable();
-            }
+            if RegCreateKeyExWHook.initialize(RegCreateKeyExW, hooked_reg_create_key_ex_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook RegCreateKeyExW".to_string() });
+            } else { let _ = RegCreateKeyExWHook.enable(); }
 
-            // Enhanced file and process hooks
-            if DeleteFileWHook.initialize(DeleteFileW, hooked_delete_file_w).is_ok() {
-                let _ = DeleteFileWHook.enable();
-            }
-            if CreateRemoteThreadHook.initialize(CreateRemoteThread, hooked_create_remote_thread).is_ok() {
-                let _ = CreateRemoteThreadHook.enable();
-            }
+            if RegSetValueExWHook.initialize(RegSetValueExW, hooked_reg_set_value_ex_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook RegSetValueExW".to_string() });
+            } else { let _ = RegSetValueExWHook.enable(); }
 
-            // Starte den periodischen Speicher-Scanner in einem eigenen Thread.
+            if RegDeleteKeyWHook.initialize(RegDeleteKeyW, hooked_reg_delete_key_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook RegDeleteKeyW".to_string() });
+            } else { let _ = RegDeleteKeyWHook.enable(); }
+
+            if DeleteFileWHook.initialize(DeleteFileW, hooked_delete_file_w).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook DeleteFileW".to_string() });
+            } else { let _ = DeleteFileWHook.enable(); }
+
+            if CreateRemoteThreadHook.initialize(CreateRemoteThread, hooked_create_remote_thread).is_err() {
+                log_event(LogEvent::Error { source: "Initialization".to_string(), message: "Failed to hook CreateRemoteThread".to_string() });
+            } else { let _ = CreateRemoteThreadHook.enable(); }
+
             thread::spawn(|| {
                 loop {
                     scan_for_manual_mapping();
-                    // Warte 60 Sekunden bis zum nächsten Scan.
                     thread::sleep(std::time::Duration::from_secs(60));
                 }
             });
         }
     }
 }
-
 
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -541,7 +582,7 @@ pub extern "system" fn DllMain(
             thread::spawn(initialize);
         }
         DLL_PROCESS_DETACH => {
-            log_message("[EXIT] Monitor-DLL wird entladen.");
+            log_event(LogEvent::Shutdown { status: "Unloading monitor DLL.".to_string() });
             if let Some(logger_mutex) = LOGGER.get() {
                  let mut logger = logger_mutex.lock().unwrap();
                  if let Some(pipe_handle) = logger.pipe.take() {
