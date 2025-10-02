@@ -1208,6 +1208,7 @@ name = "monitor_lib"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crossbeam-channel",
  "log",
  "once_cell",
  "retour",

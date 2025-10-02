@@ -13,10 +13,11 @@ use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use once_cell::sync::OnceCell;
 use serde_json::json;
+use crossbeam_channel::{Sender, unbounded, Receiver};
 
 // Use the new logging structures
 use logging::{LogEntry, LogEvent};
-use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, INVALID_HANDLE_VALUE, HWND};
+use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, INVALID_HANDLE_VALUE, HWND, CloseHandle};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::LibraryLoader::{LoadLibraryExW, LoadLibraryW, GetProcAddress, GetModuleHandleW};
 use windows_sys::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, ReadProcessMemory};
@@ -43,9 +44,11 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
 
 // Globals for logging and thread management.
-static LOGGER: OnceCell<Mutex<MonitorLogger>> = OnceCell::new();
+static LOG_SENDER: OnceCell<Sender<Option<LogEvent>>> = OnceCell::new();
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 static SCANNER_THREAD_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static LOGGING_THREAD_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
 
 // Thread-local flag to prevent re-entrancy in hooks.
 thread_local!(static IN_HOOK: Cell<bool> = Cell::new(false));
@@ -76,43 +79,14 @@ impl Drop for ReentrancyGuard {
     }
 }
 
-/// Eine Struktur, die unsere Logging-Ziele verwaltet.
-struct MonitorLogger {
-    log_file: Option<File>,
-    pipe: Option<HANDLE>,
-}
-
-/// Die zentrale Logging-Funktion. Serialisiert ein LogEvent und schreibt es als JSON.
+/// The new central logging function. It's now lightweight and non-blocking.
+/// It sends the event to the logging thread via a channel.
 fn log_event(event: LogEvent) {
-    if let Some(logger_mutex) = LOGGER.get() {
-        if let Ok(mut logger) = logger_mutex.lock() {
-            let log_entry = LogEntry::new(event);
-
-            if let Ok(json_string) = serde_json::to_string(&log_entry) {
-                let formatted_message = format!("{}\n", json_string);
-                let bytes = formatted_message.as_bytes();
-
-                if let Some(file) = logger.log_file.as_mut() {
-                    let _ = file.write_all(bytes);
-                    let _ = file.flush();
-                }
-
-                if let Some(pipe_handle) = logger.pipe {
-                    if pipe_handle != INVALID_HANDLE_VALUE {
-                        let mut bytes_written = 0;
-                        unsafe {
-                            WriteFile(
-                                pipe_handle,
-                                bytes.as_ptr(),
-                                bytes.len() as u32,
-                                &mut bytes_written,
-                                std::ptr::null_mut(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(sender) = LOG_SENDER.get() {
+        // We use try_send to avoid blocking the hooked thread if the channel is full.
+        // This is a trade-off to prevent deadlocks, but might result in lost log messages
+        // under extreme load. For this use case, it's acceptable.
+        let _ = sender.try_send(Some(event));
     }
 }
 
@@ -521,11 +495,10 @@ fn hooked_create_process_w(
     }
 }
 
-/// This function contains the core logic for DLL initialization.
-/// It sets up logging, applies API hooks, and starts background threads.
-/// It returns a `Result` to indicate success or failure, allowing `DllMain`
-/// to prevent the DLL from loading if initialization fails.
-fn dll_main_internal() -> Result<(), String> {
+/// This is the main function for the dedicated logging thread.
+/// It initializes I/O targets (file, pipe) and then enters a loop,
+/// processing log events received from the channel.
+fn logging_thread_main(receiver: Receiver<Option<LogEvent>>) {
     let pid = unsafe { GetCurrentProcessId() };
 
     // Set up the named pipe for logging.
@@ -574,11 +547,55 @@ fn dll_main_internal() -> Result<(), String> {
         }
     }
 
-    let logger = MonitorLogger { log_file, pipe: Some(pipe_handle) };
-    if LOGGER.set(Mutex::new(logger)).is_err() {
-        return Err("Failed to initialize the global logger.".to_string());
+    // The main logging loop. It will exit when it receives `None` or the sender is dropped.
+    while let Ok(Some(event)) = receiver.recv() {
+        let log_entry = LogEntry::new(event);
+        if let Ok(json_string) = serde_json::to_string(&log_entry) {
+            let formatted_message = format!("{}\n", json_string);
+            let bytes = formatted_message.as_bytes();
+
+            if let Some(file) = log_file.as_mut() {
+                let _ = file.write_all(bytes);
+                let _ = file.flush();
+            }
+
+            if pipe_handle != INVALID_HANDLE_VALUE {
+                let mut bytes_written = 0;
+                unsafe {
+                    WriteFile(
+                        pipe_handle,
+                        bytes.as_ptr(),
+                        bytes.len() as u32,
+                        &mut bytes_written,
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+        }
     }
-    
+
+    // Clean up the pipe handle when the thread exits.
+    if pipe_handle != INVALID_HANDLE_VALUE {
+        unsafe { CloseHandle(pipe_handle); }
+    }
+}
+
+
+/// This function contains the core logic for DLL initialization.
+/// It sets up logging, applies API hooks, and starts background threads.
+/// It returns a `Result` to indicate success or failure, allowing `DllMain`
+/// to prevent the DLL from loading if initialization fails.
+fn dll_main_internal() -> Result<(), String> {
+    // Create the channel for asynchronous logging.
+    let (sender, receiver) = unbounded::<Option<LogEvent>>();
+    if LOG_SENDER.set(sender).is_err() {
+        return Err("Failed to set the global log sender.".to_string());
+    }
+
+    // Spawn the dedicated logging thread.
+    let logging_handle = thread::spawn(move || logging_thread_main(receiver));
+    *LOGGING_THREAD_HANDLE.lock().unwrap() = Some(logging_handle);
+
     log_event(LogEvent::Initialization { status: "Monitor DLL initializing...".to_string() });
 
     // Initialize and enable all API hooks.
@@ -660,22 +677,21 @@ pub extern "system" fn DllMain(
         DLL_PROCESS_DETACH => {
             // Signal the memory scanner thread to shut down.
             SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-
-            // Wait for the thread to finish.
             if let Some(handle) = SCANNER_THREAD_HANDLE.lock().unwrap().take() {
                 let _ = handle.join();
             }
             
             log_event(LogEvent::Shutdown { status: "Unloading monitor DLL.".to_string() });
             
-            if let Some(logger_mutex) = LOGGER.get() {
-                 if let Ok(mut logger) = logger_mutex.lock() {
-                     if let Some(pipe_handle) = logger.pipe.take() {
-                         if pipe_handle != INVALID_HANDLE_VALUE {
-                             unsafe { windows_sys::Win32::Foundation::CloseHandle(pipe_handle); }
-                         }
-                     }
-                 }
+            // Signal the logging thread to shut down by sending a None message.
+            if let Some(sender) = LOG_SENDER.get() {
+                // We don't care if this fails, the thread might already be gone.
+                let _ = sender.send(None);
+            }
+
+            // Wait for the logging thread to finish.
+            if let Some(handle) = LOGGING_THREAD_HANDLE.lock().unwrap().take() {
+                let _ = handle.join();
             }
         }
         _ => {}

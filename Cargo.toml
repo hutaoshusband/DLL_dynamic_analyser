@@ -11,6 +11,7 @@ log = "0.4.21"
 simple_logger = "4.3.3"
 widestring = "0.5.1"
 retour = { version = "0.4.0-alpha.4", features = ["static-detour"] }
+crossbeam-channel = "0.5.12"
 
 # Define a single, unified version of windows-sys for the entire workspace
 windows-sys = { version = "0.52.0", features = [
