@@ -60,6 +60,7 @@ impl Drop for Handle {
 struct MyApp {
     target_process_name: String,
     dll_path: Option<PathBuf>,
+    second_dll_path: Option<PathBuf>,
     log_receiver: Receiver<String>,
     log_sender: Sender<String>,
     logs: Vec<String>,
@@ -109,6 +110,7 @@ impl MyApp {
         Self {
             target_process_name: "cs2.exe".to_owned(),
             dll_path,
+            second_dll_path: None,
             log_receiver,
             log_sender,
             logs: Vec::new(),
@@ -147,6 +149,24 @@ impl eframe::App for MyApp {
                 ui.label("Stellen Sie sicher, dass sich die client.dll im selben Verzeichnis wie die .exe befindet.");
             }
 
+            // --- UI für die zweite DLL ---
+            ui.horizontal(|ui| {
+                if ui.button("Zweite DLL auswählen").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("DLL", &["dll"])
+                        .pick_file()
+                    {
+                        self.second_dll_path = Some(path);
+                    }
+                }
+                if let Some(path) = &self.second_dll_path {
+                    ui.label("Zweite DLL:");
+                    ui.monospace(path.to_str().unwrap_or("Ungültiger Pfad"));
+                } else {
+                    ui.label("Keine zweite DLL ausgewählt.");
+                }
+            });
+
             ui.separator();
 
             // --- Mittlere Sektion: Steuerung ---
@@ -158,6 +178,7 @@ impl eframe::App for MyApp {
                     let logger = self.log_sender.clone();
                     let target = self.target_process_name.clone();
                     let dll_path = self.dll_path.as_ref().unwrap().clone();
+                    let second_dll_path = self.second_dll_path.clone();
                     let pid_arc = self.process_id.clone();
                     let handle_arc = self.process_handle.clone();
                     let running_arc = self.is_process_running.clone();
@@ -168,6 +189,7 @@ impl eframe::App for MyApp {
                             logger,
                             &target,
                             &dll_path,
+                            second_dll_path,
                             pid_arc,
                             handle_arc,
                             running_arc,
@@ -346,6 +368,7 @@ fn run_analysis(
     logger: Sender<String>,
     target_process_name: &str,
     dll_path: &Path,
+    second_dll_path: Option<PathBuf>,
     pid_arc: Arc<Mutex<Option<u32>>>,
     handle_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
@@ -376,6 +399,15 @@ fn run_analysis(
             logger.send(format!("DLL '{}' erfolgreich injiziert. Überwachung aktiv.", dll_path.display())).unwrap();
             *status_arc.lock().unwrap() = "Erfolgreich injiziert. Überwache Prozess.".to_string();
             *handle_arc.lock().unwrap() = Some(handle);
+
+            // Injiziere die zweite DLL, falls vorhanden
+            if let Some(path) = second_dll_path {
+                logger.send(format!("Versuche, zweite DLL zu injizieren: {}", path.display())).unwrap();
+                match inject_dll(pid, &path) {
+                    Ok(_) => logger.send(format!("Zweite DLL '{}' erfolgreich injiziert.", path.display())).unwrap(),
+                    Err(e) => logger.send(format!("Fehler beim Injizieren der zweiten DLL: {}", e)).unwrap(),
+                }
+            }
 
             // Thread, der auf das Ende des Prozesses wartet
             let logger_clone = logger.clone();

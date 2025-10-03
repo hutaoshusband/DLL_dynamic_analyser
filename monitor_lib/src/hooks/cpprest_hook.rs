@@ -1,60 +1,20 @@
 use crate::config::LogLevel;
 use crate::log_event;
 use crate::logging::LogEvent;
+use crate::scanner;
 use lazy_static::lazy_static;
-use patternscan::scan;
 use retour::static_detour;
 use serde_json::json;
 use std::ffi::c_void;
-use std::io::Cursor;
 use std::mem::transmute;
-use std::slice;
-use windows_sys::Win32::System::Diagnostics::Debug::IMAGE_NT_HEADERS64;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 
 // The signature of the target function:
 // web::http::client::details::_http_client_communicator::async_send_request_impl
 const CPPREST_SIGNATURE: &str = "48 89 5C 24 ? 48 89 74 24 ? 57 48 81 EC ? ? ? ? 48 8B F2 48 8B D9";
 
-/// Gets a slice representing the memory of the main executable module.
-/// This is unsafe because it involves reading directly from memory based on PE header information.
-unsafe fn get_main_module_slice() -> Option<&'static [u8]> {
-    let base_addr = GetModuleHandleW(std::ptr::null_mut()) as *const u8;
-    if base_addr.is_null() {
-        return None;
-    }
-    let dos_header = &*(base_addr as *const IMAGE_DOS_HEADER);
-    if dos_header.e_magic != 0x5A4D { // "MZ"
-        return None;
-    }
-    let nt_headers_ptr = base_addr.add(dos_header.e_lfanew as usize) as *const IMAGE_NT_HEADERS64;
-    let nt_headers = &*nt_headers_ptr;
-    if nt_headers.Signature != 0x4550 { // "PE\0\0"
-        return None;
-    }
-    let size_of_image = nt_headers.OptionalHeader.SizeOfImage;
-    Some(slice::from_raw_parts(base_addr, size_of_image as usize))
-}
-
 lazy_static! {
     static ref CPPREST_SEND_REQUEST_FN_ADDR: Option<usize> = {
-        unsafe {
-            if let Some(module_slice) = get_main_module_slice() {
-                let base_address = module_slice.as_ptr() as usize;
-                // Use a cursor to read from the in-memory slice
-                let mut cursor = Cursor::new(module_slice);
-                // The scan function gives us offsets from the start of the slice
-                if let Ok(offsets) = scan(&mut cursor, CPPREST_SIGNATURE) {
-                    // We only need the first match
-                    offsets.first().map(|offset| base_address + offset)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
+        scanner::find_signature(CPPREST_SIGNATURE)
     };
 }
 

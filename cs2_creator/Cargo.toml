@@ -10,6 +10,7 @@ embed-resource = "2.2.0"
 windows-sys = { workspace = true }
 eframe = "0.27.2"
 egui = "0.27.2"
+rfd = "0.14.1"
 
 [[bin]]
 name = "cs2_creator"
