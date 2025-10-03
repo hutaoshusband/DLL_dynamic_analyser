@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![cfg(windows)]
 mod config;
 mod logging;
@@ -42,7 +43,7 @@ use windows_sys::Win32::System::SystemServices::{
     DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH, IMAGE_DOS_HEADER,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, GetCurrentProcess, GetCurrentProcessId, Sleep,
+    CreateProcessW, CreateRemoteThread, ExitProcess, GetCurrentProcess, GetCurrentProcessId, Sleep,
     LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, STARTUPINFOW, THREAD_CREATION_FLAGS,
 };
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
@@ -91,7 +92,6 @@ fn log_event(level: LogLevel, event: LogEvent) {
 }
 
 retour::static_detour! {
-    // ... (all static detours remain the same)
     static MessageBoxWHook: unsafe extern "system" fn(HWND, *const u16, *const u16, u32) -> i32;
     static CreateFileWHook: unsafe extern "system" fn(
         *const u16, u32, u32, *const SECURITY_ATTRIBUTES, u32, u32, HANDLE
@@ -120,6 +120,20 @@ retour::static_detour! {
     static GetAddrInfoWHook: unsafe extern "system" fn(
         *const u16, *const u16, *const ADDRINFOW, *mut *mut ADDRINFOW
     ) -> i32;
+    static ExitProcessHook: unsafe extern "system" fn(u32);
+
+}
+// Neue Hook-Funktion für ExitProcess
+fn hooked_exit_process(u_exit_code: u32) {
+    log_event(LogLevel::Error, LogEvent::ApiHook {
+        function_name: "ExitProcess".to_string(),
+        parameters: json!({
+            "exit_code": u_exit_code,
+            "action": "Blocked" // Verdeutlicht, dass die Aktion blockiert wurde
+        }),
+    });
+    // Die ursprüngliche Funktion wird absichtlich NICHT aufgerufen, um das Beenden zu verhindern.
+    // unsafe { ExitProcessHook.call(u_exit_code) }
 }
 
 fn safe_u16_str(ptr: *const u16) -> String {
@@ -415,6 +429,12 @@ fn dll_main_internal() -> Result<(), String> {
             };
         }
         
+// Schritt 1: Cast zu einem rohen Zeiger
+let exit_process_raw_ptr = ExitProcess as *const ();
+// Schritt 2: Den rohen Zeiger zum korrekten Funktionstyp transmutieren
+let exit_process_ptr: unsafe extern "system" fn(u32) = std::mem::transmute(exit_process_raw_ptr);
+// Schritt 3: Den finalen Pointer zum Hooken verwenden
+hook!(ExitProcessHook, exit_process_ptr, hooked_exit_process);
         hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
         hook!(CreateFileWHook, CreateFileW, hooked_create_file_w);
         hook!(WriteFileHook, WriteFile, hooked_write_file);
