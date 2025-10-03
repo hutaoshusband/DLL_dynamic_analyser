@@ -1,5 +1,5 @@
-use crate::config::LogLevel;
-use crate::logging::LogEvent;
+use crate::config::{LogLevel, CONFIG};
+use crate::logging::{capture_stack_trace, LogEvent};
 use crate::log_event;
 use crate::ReentrancyGuard;
 use retour::static_detour;
@@ -17,16 +17,18 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DeleteFileW, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LoadLibraryExW, LoadLibraryW,
 };
+use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, PAGE_EXECUTE_READWRITE};
 use windows_sys::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, ExitProcess, LPTHREAD_START_ROUTINE, PROCESS_INFORMATION,
-    STARTUPINFOW, THREAD_CREATION_FLAGS, TerminateProcess,
+    CreateProcessW, CreateRemoteThread, ExitProcess, OpenProcess, LPTHREAD_START_ROUTINE,
+    PROCESS_INFORMATION, STARTUPINFOW, THREAD_CREATION_FLAGS, TerminateProcess,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 
@@ -72,6 +74,9 @@ unsafe fn format_buffer_preview(ptr: *const u8, len: u32) -> String {
 }
 
 static_detour! {
+    pub static OpenProcessHook: unsafe extern "system" fn(u32, BOOL, u32) -> HANDLE;
+    pub static WriteProcessMemoryHook: unsafe extern "system" fn(HANDLE, *const c_void, *const c_void, usize, *mut usize) -> BOOL;
+    pub static VirtualAllocExHook: unsafe extern "system" fn(HANDLE, *const c_void, usize, u32, u32) -> *mut c_void;
     pub static CreateFileWHook: unsafe extern "system" fn(
         *const u16, u32, u32, *const SECURITY_ATTRIBUTES, u32, u32, HANDLE
     ) -> HANDLE;
@@ -125,6 +130,7 @@ pub unsafe fn hooked_create_file_w(
                 "filePath": safe_u16_str(lp_file_name),
                 "desiredAccess": format_access_flags(dw_desired_access),
             }),
+            stack_trace: None,
         });
     }
 
@@ -154,6 +160,7 @@ pub unsafe fn hooked_write_file(
                 "bytesToWrite": n_number_of_bytes_to_write,
                 "dataPreview": format_buffer_preview(lp_buffer, n_number_of_bytes_to_write),
             }),
+            stack_trace: None,
         });
     }
 
@@ -167,12 +174,14 @@ pub unsafe fn hooked_write_file(
 }
 
 pub fn hooked_exit_process(u_exit_code: u32) -> ! {
+    let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
     log_event(LogLevel::Fatal, LogEvent::ApiHook {
         function_name: "ExitProcess".to_string(),
         parameters: json!({
             "exit_code": u_exit_code,
             "action": "Termination blocked. The process will hang instead of exiting."
         }),
+        stack_trace,
     });
 
     // This function must not return to properly emulate ExitProcess.
@@ -183,6 +192,7 @@ pub fn hooked_exit_process(u_exit_code: u32) -> ! {
 }
 
 pub fn hooked_terminate_process(h_process: HANDLE, u_exit_code: u32) -> BOOL {
+    let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
     log_event(LogLevel::Fatal, LogEvent::ApiHook {
         function_name: "TerminateProcess".to_string(),
         parameters: json!({
@@ -190,12 +200,14 @@ pub fn hooked_terminate_process(h_process: HANDLE, u_exit_code: u32) -> BOOL {
             "exit_code": u_exit_code,
             "action": "Termination blocked. Returning FALSE."
         }),
+        stack_trace,
     });
 
     0 // Return FALSE to indicate that termination failed.
 }
 
 pub fn hooked_nt_terminate_process(h_process: HANDLE, exit_status: u32) -> i32 {
+    let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
     log_event(LogLevel::Fatal, LogEvent::ApiHook {
         function_name: "NtTerminateProcess".to_string(),
         parameters: json!({
@@ -203,6 +215,7 @@ pub fn hooked_nt_terminate_process(h_process: HANDLE, exit_status: u32) -> i32 {
             "exit_status": exit_status,
             "action": "Termination blocked. Returning STATUS_ACCESS_DENIED."
         }),
+        stack_trace,
     });
 
     0xC0000022u32 as i32 // STATUS_ACCESS_DENIED
@@ -223,6 +236,7 @@ pub fn hooked_http_send_request_w(
             "headers_length": dw_headers_length,
             "optional_data_length": dw_optional_length,
         }),
+        stack_trace: None,
     });
 
     unsafe {
@@ -247,6 +261,7 @@ pub fn hooked_get_addr_info_w(
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "GetAddrInfoW".to_string(),
         parameters: json!({ "node_name": node_name, "service_name": service_name }),
+        stack_trace: None,
     });
     unsafe { GetAddrInfoWHook.call(p_node_name, p_service_name, p_hints, pp_result) }
 }
@@ -257,6 +272,7 @@ pub fn hooked_message_box_w(h_wnd: HWND, text: *const u16, caption: *const u16, 
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "MessageBoxW".to_string(),
         parameters: json!({ "title": caption_str, "text": text_str, "type": u_type }),
+        stack_trace: None,
     });
     unsafe { MessageBoxWHook.call(h_wnd, text, caption, u_type) }
 }
@@ -283,6 +299,7 @@ pub fn hooked_connect(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
             log_event(LogLevel::Debug, LogEvent::ApiHook {
                 function_name: "connect".to_string(),
                 parameters: json!({ "target_ip": ip_str, "port": port }),
+                stack_trace: None,
             });
         }
     }
@@ -314,6 +331,7 @@ pub fn hooked_reg_create_key_ex_w(
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "RegCreateKeyExW".to_string(),
         parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
+        stack_trace: None,
     });
     unsafe {
         RegCreateKeyExWHook.call(
@@ -342,6 +360,7 @@ pub fn hooked_reg_set_value_ex_w(
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "RegSetValueExW".to_string(),
         parameters: json!({ "key": hkey_to_string(hkey), "value_name": value_name, "type": dw_type, "bytes": cb_data }),
+        stack_trace: None,
     });
     unsafe { RegSetValueExWHook.call(hkey, lp_value_name, _reserved, dw_type, lp_data, cb_data) }
 }
@@ -351,6 +370,7 @@ pub fn hooked_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u16) -> u32 {
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "RegDeleteKeyW".to_string(),
         parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
+        stack_trace: None,
     });
     unsafe { RegDeleteKeyWHook.call(hkey, lp_sub_key) }
 }
@@ -360,8 +380,79 @@ pub fn hooked_delete_file_w(lp_file_name: *const u16) -> BOOL {
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "DeleteFileW".to_string(),
         parameters: json!({ "file_name": file_name }),
+        stack_trace: None,
     });
     unsafe { DeleteFileWHook.call(lp_file_name) }
+}
+
+pub unsafe fn hooked_open_process(
+    dw_desired_access: u32,
+    b_inherit_handle: BOOL,
+    dw_process_id: u32,
+) -> HANDLE {
+    log_event(LogLevel::Warn, LogEvent::ApiHook {
+        function_name: "OpenProcess".to_string(),
+        parameters: json!({
+            "target_pid": dw_process_id,
+            "desired_access": dw_desired_access,
+        }),
+        stack_trace: None,
+    });
+    OpenProcessHook.call(dw_desired_access, b_inherit_handle, dw_process_id)
+}
+
+pub unsafe fn hooked_write_process_memory(
+    h_process: HANDLE,
+    lp_base_address: *const c_void,
+    lp_buffer: *const c_void,
+    n_size: usize,
+    lp_number_of_bytes_written: *mut usize,
+) -> BOOL {
+    log_event(LogLevel::Warn, LogEvent::ApiHook {
+        function_name: "WriteProcessMemory".to_string(),
+        parameters: json!({
+            "target_process_handle": h_process as usize,
+            "base_address": lp_base_address as usize,
+            "size": n_size,
+            "data_preview": format_buffer_preview(lp_buffer as *const u8, n_size as u32),
+        }),
+        stack_trace: None,
+    });
+    WriteProcessMemoryHook.call(
+        h_process,
+        lp_base_address,
+        lp_buffer,
+        n_size,
+        lp_number_of_bytes_written,
+    )
+}
+
+pub unsafe fn hooked_virtual_alloc_ex(
+    h_process: HANDLE,
+    lp_address: *const c_void,
+    dw_size: usize,
+    fl_allocation_type: u32,
+    fl_protect: u32,
+) -> *mut c_void {
+    // Log only potentially suspicious allocations
+    if (fl_allocation_type & MEM_COMMIT != 0) && (fl_protect & PAGE_EXECUTE_READWRITE != 0) {
+        log_event(LogLevel::Warn, LogEvent::ApiHook {
+            function_name: "VirtualAllocEx".to_string(),
+            parameters: json!({
+                "target_process_handle": h_process as usize,
+                "size": dw_size,
+                "protection": "PAGE_EXECUTE_READWRITE",
+            }),
+            stack_trace: None,
+        });
+    }
+    VirtualAllocExHook.call(
+        h_process,
+        lp_address,
+        dw_size,
+        fl_allocation_type,
+        fl_protect,
+    )
 }
 
 pub fn hooked_create_remote_thread(
@@ -376,7 +467,8 @@ pub fn hooked_create_remote_thread(
     let start_address_val = lp_start_address.map_or(0, |f| f as usize);
     log_event(LogLevel::Warn, LogEvent::ApiHook {
         function_name: "CreateRemoteThread".to_string(),
-        parameters: json!({ "target_process_handle": h_process, "start_address": start_address_val }),
+        parameters: json!({ "target_process_handle": h_process as usize, "start_address": start_address_val }),
+        stack_trace: None,
     });
     unsafe {
         CreateRemoteThreadHook.call(
@@ -396,6 +488,7 @@ pub fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "LoadLibraryW".to_string(),
         parameters: json!({ "library_name": lib_name }),
+        stack_trace: None,
     });
     unsafe { LoadLibraryWHook.call(lp_lib_file_name) }
 }
@@ -409,6 +502,7 @@ pub fn hooked_load_library_ex_w(
     log_event(LogLevel::Debug, LogEvent::ApiHook {
         function_name: "LoadLibraryExW".to_string(),
         parameters: json!({ "library_name": lib_name, "flags": dw_flags }),
+        stack_trace: None,
     });
     unsafe { LoadLibraryExWHook.call(lp_lib_file_name, h_file, dw_flags) }
 }
@@ -430,6 +524,7 @@ pub fn hooked_create_process_w(
     log_event(LogLevel::Warn, LogEvent::ApiHook {
         function_name: "CreateProcessW".to_string(),
         parameters: json!({ "application_name": app_name, "command_line": cmd_line }),
+        stack_trace: None,
     });
     unsafe {
         CreateProcessWHook.call(
@@ -489,6 +584,21 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
     });
     hook!(CreateProcessWHook, CreateProcessW, hooked_create_process_w);
     hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
+
+    // Hook process interaction functions
+    hook!(OpenProcessHook, OpenProcess, |a, b, c| {
+        hooked_open_process(a, b, c)
+    });
+    hook!(
+        WriteProcessMemoryHook,
+        WriteProcessMemory,
+        |a, b, c, d, e| hooked_write_process_memory(a, b, c, d, e)
+    );
+    hook!(
+        VirtualAllocExHook,
+        VirtualAllocEx,
+        |a, b, c, d, e| hooked_virtual_alloc_ex(a, b, c, d, e)
+    );
 
     // Hook library loading functions.
     hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);

@@ -64,6 +64,7 @@ unsafe fn hooked_cpprest_send_request(
             "path": path,
             "method": method,
         }),
+        stack_trace: None,
     });
 
     // Call the original function to ensure the application continues to work correctly.

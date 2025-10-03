@@ -40,18 +40,33 @@ pub struct LogEntry {
 impl LogEntry {
     /// Creates a new LogEntry for a given event, automatically capturing
     /// the timestamp, process ID, and thread ID. The stack trace is captured
-    /// conditionally based on the global configuration and the event's log level.
-    pub fn new(level: LogLevel, event: LogEvent) -> Self {
-        let should_capture_stack = if CONFIG.stack_trace_on_error_only {
-            level == LogLevel::Error
-        } else {
-            true // Capture if the setting is disabled
-        };
-
-        let stack_trace = if should_capture_stack {
-            Some(capture_stack_trace(CONFIG.stack_trace_frame_limit))
+    /// conditionally based on the global configuration and the event's log level,
+    /// unless a stack trace is already provided with the event itself.
+    pub fn new(level: LogLevel, mut event: LogEvent) -> Self {
+        // Check if the event itself comes with a stack trace.
+        // We take it from the event, so it's not duplicated in the final JSON.
+        let event_stack_trace = if let LogEvent::ApiHook { stack_trace, .. } = &mut event {
+            stack_trace.take()
         } else {
             None
+        };
+
+        let final_stack_trace = if event_stack_trace.is_some() {
+            event_stack_trace
+        } else {
+            // Fallback to the original logic if no trace is provided in the event.
+            let should_capture_stack = if CONFIG.stack_trace_on_error_only {
+                // For Fatal and Error, we always want a trace if possible.
+                level == LogLevel::Error || level == LogLevel::Fatal
+            } else {
+                true // Capture if the setting is disabled
+            };
+
+            if should_capture_stack {
+                Some(capture_stack_trace(CONFIG.stack_trace_frame_limit))
+            } else {
+                None
+            }
         };
 
         Self {
@@ -60,7 +75,7 @@ impl LogEntry {
             process_id: unsafe { GetCurrentProcessId() },
             thread_id: unsafe { GetCurrentThreadId() },
             event,
-            stack_trace,
+            stack_trace: final_stack_trace,
         }
     }
 }
@@ -78,6 +93,8 @@ pub enum LogEvent {
     ApiHook {
         function_name: String,
         parameters: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stack_trace: Option<Vec<String>>,
     },
     MemoryScan {
         status: String,

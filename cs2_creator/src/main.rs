@@ -17,10 +17,11 @@ use eframe::egui;
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE},
     System::{
-        Diagnostics::Debug::WriteProcessMemory,
+        Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory},
         Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
+            CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW,
+            Process32NextW, MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE,
+            TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
         },
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
         Memory::{
@@ -56,6 +57,14 @@ impl Drop for Handle {
         }
     }
 }
+/// Enthält Informationen über ein geladenes Modul (DLL).
+#[derive(Clone, Debug)]
+struct ModuleInfo {
+    name: String,
+    base_address: usize,
+    size: u32,
+}
+
 /// State für die GUI-Anwendung.
 struct MyApp {
     target_process_name: String,
@@ -68,6 +77,8 @@ struct MyApp {
     process_handle: Arc<Mutex<Option<isize>>>,
     is_process_running: Arc<AtomicBool>,
     injection_status: Arc<Mutex<String>>,
+    modules: Arc<Mutex<Vec<ModuleInfo>>>,
+    selected_module_index: Option<usize>,
 }
 
 impl MyApp {
@@ -118,7 +129,74 @@ impl MyApp {
             process_handle: Arc::new(Mutex::new(None)),
             is_process_running: Arc::new(AtomicBool::new(false)),
             injection_status: Arc::new(Mutex::new("Nicht injiziert".to_string())),
+            modules: Arc::new(Mutex::new(Vec::new())),
+            selected_module_index: None,
         }
+    }
+}
+
+/// Schreibt den Speicher eines Moduls aus einem fremden Prozess in eine Datei.
+fn dump_module_from_process(
+    process_handle: isize,
+    module: &ModuleInfo,
+    logger: &Sender<String>,
+) {
+    let file_path = rfd::FileDialog::new()
+        .set_file_name(&module.name)
+        .add_filter("DLL", &["dll"])
+        .add_filter("All Files", &["*"])
+        .save_file();
+
+    let Some(target_path) = file_path else {
+        logger.send("DLL-Dump abgebrochen.".to_string()).unwrap();
+        return;
+    };
+
+    logger
+        .send(format!(
+            "Versuche, Modul '{}' ({} Bytes) von Adresse 0x{:X} zu dumpen...",
+            module.name, module.size, module.base_address
+        ))
+        .unwrap();
+
+    let mut buffer = vec![0u8; module.size as usize];
+    let mut bytes_read = 0;
+
+    let success = unsafe {
+        ReadProcessMemory(
+            process_handle,
+            module.base_address as _,
+            buffer.as_mut_ptr() as _,
+            buffer.len(),
+            &mut bytes_read,
+        ) != 0
+    };
+
+    if success && bytes_read == buffer.len() {
+        match std::fs::write(&target_path, &buffer) {
+            Ok(_) => {
+                logger
+                    .send(format!(
+                        "Modul erfolgreich nach '{}' gedumpt.",
+                        target_path.display()
+                    ))
+                    .unwrap();
+            }
+            Err(e) => {
+                logger
+                    .send(format!("Fehler beim Schreiben der Dump-Datei: {}", e))
+                    .unwrap();
+            }
+        }
+    } else {
+        logger
+            .send(format!(
+                "ReadProcessMemory fehlgeschlagen. Gelesen: {}/{} Bytes. Fehlercode: {}",
+                bytes_read,
+                buffer.len(),
+                unsafe { GetLastError() }
+            ))
+            .unwrap();
     }
 }
 
@@ -218,8 +296,63 @@ impl eframe::App for MyApp {
                     *self.process_handle.lock().unwrap() = None;
                     self.is_process_running.store(false, Ordering::SeqCst);
                     *self.injection_status.lock().unwrap() = "Prozess manuell beendet".to_string();
+                    self.modules.lock().unwrap().clear();
+                    self.selected_module_index = None;
                 }
             });
+
+            ui.separator();
+
+            // --- Sektion: Modul-Dumping ---
+            ui.heading("DLLs im Zielprozess");
+            ui.horizontal(|ui| {
+                let is_running = self.is_process_running.load(Ordering::SeqCst);
+                if ui.add_enabled(is_running, egui::Button::new("Geladene DLLs aktualisieren")).clicked() {
+                    if let Some(pid) = *self.process_id.lock().unwrap() {
+                        match get_modules_for_process(pid) {
+                            Ok(modules) => {
+                                self.log_sender.send(format!("{} Module gefunden.", modules.len())).unwrap();
+                                *self.modules.lock().unwrap() = modules;
+                                self.selected_module_index = None; // Reset selection
+                            }
+                            Err(e) => {
+                                self.log_sender.send(format!("Fehler beim Abrufen der Module: {}", e)).unwrap();
+                            }
+                        }
+                    } else {
+                        self.log_sender.send("Fehler: Kein Prozess ausgewählt.".to_string()).unwrap();
+                    }
+                }
+
+                if ui.add_enabled(self.selected_module_index.is_some(), egui::Button::new("Ausgewählte DLL dumpen")).clicked() {
+                    if let (Some(handle), Some(index)) =
+                        (*self.process_handle.lock().unwrap(), self.selected_module_index)
+                    {
+                        let modules = self.modules.lock().unwrap();
+                        if let Some(module_info) = modules.get(index) {
+                            dump_module_from_process(handle, module_info, &self.log_sender);
+                        }
+                    } else {
+                        self.log_sender.send("Fehler: Kein Prozess-Handle oder kein Modul ausgewählt.".to_string()).unwrap();
+                    }
+                }
+            });
+
+            // Dropdown-Menü für die Modulauswahl
+            let mut modules_guard = self.modules.lock().unwrap();
+            let module_names: Vec<String> = modules_guard.iter().map(|m| m.name.clone()).collect();
+            let selected_module_name = self.selected_module_index.map(|i| module_names[i].clone()).unwrap_or_else(|| "Kein Modul ausgewählt".to_string());
+
+            egui::ComboBox::from_label("Wähle eine DLL zum Dumpen aus")
+                .selected_text(selected_module_name)
+                .show_ui(ui, |ui| {
+                    for (i, name) in module_names.iter().enumerate() {
+                        if ui.selectable_label(self.selected_module_index == Some(i), name).clicked() {
+                            self.selected_module_index = Some(i);
+                        }
+                    }
+                });
+
 
             ui.separator();
 
@@ -271,6 +404,48 @@ fn find_process_id(target_process_name: &str, logger: &Sender<String>) -> Option
         }
     }
     None
+}
+
+/// Ruft eine Liste der geladenen Module für einen bestimmten Prozess ab.
+fn get_modules_for_process(pid: u32) -> Result<Vec<ModuleInfo>, String> {
+    unsafe {
+        let snapshot_handle = Handle(CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+            pid,
+        ));
+        if snapshot_handle.0 == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "CreateToolhelp32Snapshot (Module) failed: {}",
+                GetLastError()
+            ));
+        }
+
+        let mut module_entry: MODULEENTRY32W = mem::zeroed();
+        module_entry.dwSize = mem::size_of::<MODULEENTRY32W>() as u32;
+        let mut modules = Vec::new();
+
+        if Module32FirstW(snapshot_handle.0, &mut module_entry) != 0 {
+            loop {
+                let module_name = OsString::from_wide(
+                    &module_entry.szModule
+                        [..module_entry.szModule.iter().position(|&c| c == 0).unwrap_or(0)],
+                )
+                .to_string_lossy()
+                .into_owned();
+
+                modules.push(ModuleInfo {
+                    name: module_name,
+                    base_address: module_entry.modBaseAddr as usize,
+                    size: module_entry.modBaseSize,
+                });
+
+                if Module32NextW(snapshot_handle.0, &mut module_entry) == 0 {
+                    break;
+                }
+            }
+        }
+        Ok(modules)
+    }
 }
 
 /// Injiziert eine DLL in einen Prozess.
