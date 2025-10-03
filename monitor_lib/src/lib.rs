@@ -45,9 +45,13 @@ use windows_sys::Win32::System::SystemServices::{
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, CreateRemoteThread, ExitProcess, GetCurrentProcess, GetCurrentProcessId, Sleep,
     LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, STARTUPINFOW, THREAD_CREATION_FLAGS,
+    TerminateProcess,
 };
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
+
+// Manually define HINTERNET as isize to fix compilation issue.
+type HINTERNET = isize;
 
 // Globals for logging and thread management.
 static LOG_SENDER: OnceCell<Sender<Option<(LogLevel, LogEvent)>>> = OnceCell::new();
@@ -92,6 +96,9 @@ fn log_event(level: LogLevel, event: LogEvent) {
 }
 
 retour::static_detour! {
+    static HttpSendRequestWHook: unsafe extern "system" fn(HINTERNET, *const u16, u32, *const c_void, u32) -> BOOL;
+    static TerminateProcessHook: unsafe extern "system" fn(HANDLE, u32) -> BOOL;
+    static NtTerminateProcessHook: unsafe extern "system" fn(HANDLE, u32) -> i32;
     static MessageBoxWHook: unsafe extern "system" fn(HWND, *const u16, *const u16, u32) -> i32;
     static CreateFileWHook: unsafe extern "system" fn(
         *const u16, u32, u32, *const SECURITY_ATTRIBUTES, u32, u32, HANDLE
@@ -134,6 +141,56 @@ fn hooked_exit_process(u_exit_code: u32) {
     });
     // Die ursprüngliche Funktion wird absichtlich NICHT aufgerufen, um das Beenden zu verhindern.
     // unsafe { ExitProcessHook.call(u_exit_code) }
+}
+
+
+fn hooked_terminate_process(h_process: HANDLE, u_exit_code: u32) -> BOOL {
+    log_event(LogLevel::Error, LogEvent::ApiHook {
+        function_name: "TerminateProcess".to_string(),
+        parameters: json!({
+            "process_handle": h_process,
+            "exit_code": u_exit_code,
+            "action": "Blocked"
+        }),
+    });
+    // Do not call the original function to block termination.
+    0 // FALSE
+}
+
+fn hooked_nt_terminate_process(h_process: HANDLE, exit_status: u32) -> i32 {
+    log_event(LogLevel::Error, LogEvent::ApiHook {
+        function_name: "NtTerminateProcess".to_string(),
+        parameters: json!({
+            "process_handle": h_process,
+            "exit_status": exit_status,
+            "action": "Blocked"
+        }),
+    });
+    // Do not call the original function.
+    // STATUS_ACCESS_DENIED
+    0xC0000022u32 as i32
+}
+
+fn hooked_http_send_request_w(
+    h_request: HINTERNET,
+    lpsz_headers: *const u16,
+    dw_headers_length: u32,
+    lp_optional: *const c_void,
+    dw_optional_length: u32,
+) -> BOOL {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        let headers = safe_u16_str(lpsz_headers);
+        log_event(LogLevel::Info, LogEvent::ApiHook {
+            function_name: "HttpSendRequestW".to_string(),
+            parameters: json!({
+                "headers": headers,
+                "headers_length": dw_headers_length,
+                "optional_data_length": dw_optional_length,
+            }),
+        });
+    }
+    // Call the original function to allow the request to proceed.
+    unsafe { HttpSendRequestWHook.call(h_request, lpsz_headers, dw_headers_length, lp_optional, dw_optional_length) }
 }
 
 fn safe_u16_str(ptr: *const u16) -> String {
@@ -435,6 +492,11 @@ let exit_process_raw_ptr = ExitProcess as *const ();
 let exit_process_ptr: unsafe extern "system" fn(u32) = std::mem::transmute(exit_process_raw_ptr);
 // Schritt 3: Den finalen Pointer zum Hooken verwenden
 hook!(ExitProcessHook, exit_process_ptr, hooked_exit_process);
+
+let terminate_process_raw_ptr = TerminateProcess as *const ();
+let terminate_process_ptr: unsafe extern "system" fn(HANDLE, u32) -> BOOL = std::mem::transmute(terminate_process_raw_ptr);
+hook!(TerminateProcessHook, terminate_process_ptr, hooked_terminate_process);
+
         hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
         hook!(CreateFileWHook, CreateFileW, hooked_create_file_w);
         hook!(WriteFileHook, WriteFile, hooked_write_file);
@@ -452,6 +514,21 @@ hook!(ExitProcessHook, exit_process_ptr, hooked_exit_process);
         if ws2_32 != 0 {
             if let Some(addr) = GetProcAddress(ws2_32, b"connect\0".as_ptr()) { hook!(ConnectHook, std::mem::transmute(addr), hooked_connect); }
             if let Some(addr) = GetProcAddress(ws2_32, b"GetAddrInfoW\0".as_ptr()) { hook!(GetAddrInfoWHook, std::mem::transmute(addr), hooked_get_addr_info_w); }
+        }
+        let ntdll_name: Vec<u16> = "ntdll.dll".encode_utf16().chain(std::iter::once(0)).collect();
+        let ntdll = GetModuleHandleW(ntdll_name.as_ptr());
+        if ntdll != 0 {
+            if let Some(addr) = GetProcAddress(ntdll, b"NtTerminateProcess\0".as_ptr()) {
+                hook!(NtTerminateProcessHook, std::mem::transmute(addr), hooked_nt_terminate_process);
+            }
+        }
+
+        let wininet_name: Vec<u16> = "wininet.dll".encode_utf16().chain(std::iter::once(0)).collect();
+        let wininet = GetModuleHandleW(wininet_name.as_ptr());
+        if wininet != 0 {
+            if let Some(addr) = GetProcAddress(wininet, b"HttpSendRequestW\0".as_ptr()) {
+                hook!(HttpSendRequestWHook, std::mem::transmute(addr), hooked_http_send_request_w);
+            }
         }
     }
 
