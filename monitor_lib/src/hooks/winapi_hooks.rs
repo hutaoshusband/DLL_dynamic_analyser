@@ -1,10 +1,12 @@
 use crate::config::LogLevel;
 use crate::logging::LogEvent;
 use crate::log_event;
+use crate::ReentrancyGuard;
 use retour::static_detour;
 use serde_json::json;
 use std::ffi::c_void;
 use std::slice;
+use std::thread;
 use widestring::U16CStr;
 
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND};
@@ -103,7 +105,7 @@ static_detour! {
     pub static GetAddrInfoWHook: unsafe extern "system" fn(
         *const u16, *const u16, *const ADDRINFOW, *mut *mut ADDRINFOW
     ) -> i32;
-    pub static ExitProcessHook: unsafe extern "system" fn(u32);
+    pub static ExitProcessHook: unsafe extern "system" fn(u32) -> !;
 }
 
 /// Hook for `CreateFileW`. Logs the file path and desired access rights.
@@ -116,13 +118,15 @@ pub unsafe fn hooked_create_file_w(
     dw_flags_and_attributes: u32,
     h_template_file: HANDLE,
 ) -> HANDLE {
-    log_event(LogLevel::Info, LogEvent::ApiHook {
-        function_name: "CreateFileW".to_string(),
-        parameters: json!({
-            "filePath": safe_u16_str(lp_file_name),
-            "desiredAccess": format_access_flags(dw_desired_access),
-        }),
-    });
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(LogLevel::Info, LogEvent::ApiHook {
+            function_name: "CreateFileW".to_string(),
+            parameters: json!({
+                "filePath": safe_u16_str(lp_file_name),
+                "desiredAccess": format_access_flags(dw_desired_access),
+            }),
+        });
+    }
 
     CreateFileWHook.call(
         lp_file_name,
@@ -143,13 +147,15 @@ pub unsafe fn hooked_write_file(
     lp_number_of_bytes_written: *mut u32,
     lp_overlapped: *mut OVERLAPPED,
 ) -> BOOL {
-    log_event(LogLevel::Info, LogEvent::ApiHook {
-        function_name: "WriteFile".to_string(),
-        parameters: json!({
-            "bytesToWrite": n_number_of_bytes_to_write,
-            "dataPreview": format_buffer_preview(lp_buffer, n_number_of_bytes_to_write),
-        }),
-    });
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(LogLevel::Info, LogEvent::ApiHook {
+            function_name: "WriteFile".to_string(),
+            parameters: json!({
+                "bytesToWrite": n_number_of_bytes_to_write,
+                "dataPreview": format_buffer_preview(lp_buffer, n_number_of_bytes_to_write),
+            }),
+        });
+    }
 
     WriteFileHook.call(
         h_file,
@@ -160,40 +166,46 @@ pub unsafe fn hooked_write_file(
     )
 }
 
-pub fn hooked_exit_process(u_exit_code: u32) {
-    log_event(LogLevel::Error, LogEvent::ApiHook {
+pub fn hooked_exit_process(u_exit_code: u32) -> ! {
+    log_event(LogLevel::Fatal, LogEvent::ApiHook {
         function_name: "ExitProcess".to_string(),
         parameters: json!({
             "exit_code": u_exit_code,
-            "action": "Blocked"
+            "action": "Termination blocked. The process will hang instead of exiting."
         }),
     });
+
+    // This function must not return to properly emulate ExitProcess.
+    // We loop indefinitely to prevent the process from exiting.
+    loop {
+        thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 pub fn hooked_terminate_process(h_process: HANDLE, u_exit_code: u32) -> BOOL {
-    log_event(LogLevel::Error, LogEvent::ApiHook {
+    log_event(LogLevel::Fatal, LogEvent::ApiHook {
         function_name: "TerminateProcess".to_string(),
         parameters: json!({
-            "process_handle": h_process,
+            "process_handle": format!("{:?}", h_process),
             "exit_code": u_exit_code,
-            "action": "Blocked"
+            "action": "Termination blocked. Returning FALSE."
         }),
     });
 
-    0
+    0 // Return FALSE to indicate that termination failed.
 }
 
 pub fn hooked_nt_terminate_process(h_process: HANDLE, exit_status: u32) -> i32 {
-    log_event(LogLevel::Error, LogEvent::ApiHook {
+    log_event(LogLevel::Fatal, LogEvent::ApiHook {
         function_name: "NtTerminateProcess".to_string(),
         parameters: json!({
-            "process_handle": h_process,
+            "process_handle": format!("{:?}", h_process),
             "exit_status": exit_status,
-            "action": "Blocked"
+            "action": "Termination blocked. Returning STATUS_ACCESS_DENIED."
         }),
     });
 
-    0xC0000022u32 as i32
+    0xC0000022u32 as i32 // STATUS_ACCESS_DENIED
 }
 
 pub fn hooked_http_send_request_w(
@@ -457,7 +469,7 @@ macro_rules! hook {
 
 pub unsafe fn initialize_all_hooks() -> Result<(), String> {
     // Hook critical process termination functions.
-    let exit_process_ptr: unsafe extern "system" fn(u32) =
+    let exit_process_ptr: unsafe extern "system" fn(u32) -> ! =
         std::mem::transmute(ExitProcess as *const ());
     hook!(ExitProcessHook, exit_process_ptr, hooked_exit_process);
 

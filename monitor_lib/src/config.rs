@@ -4,11 +4,12 @@ use std::str::FromStr;
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
-    Error = 0,
-    Warn = 1,
-    Info = 2,
-    Debug = 3,
-    Trace = 4,
+    Fatal = 0,
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
 }
 
 impl FromStr for LogLevel {
@@ -16,6 +17,7 @@ impl FromStr for LogLevel {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "fatal" => Ok(LogLevel::Fatal),
             "error" => Ok(LogLevel::Error),
             "warn" => Ok(LogLevel::Warn),
             "info" => Ok(LogLevel::Info),
