@@ -1,10 +1,13 @@
 #![recursion_limit = "256"]
 #![cfg(windows)]
 mod config;
-mod hooks;
+mod hooks; // Contains cpprest_hook and winapi_hooks
 mod logging;
 
 use crate::config::{LogLevel, CONFIG};
+use crate::hooks::winapi_hooks::{
+    CreateFileWHook, WriteFileHook, hooked_create_file_w, hooked_write_file,
+};
 use crate::logging::{LogEntry, LogEvent};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
@@ -26,10 +29,9 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, DeleteFileW, GetFinalPathNameByHandleW, WriteFile, OPEN_EXISTING,
+    CreateFileW, DeleteFileW, WriteFile, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, ReadProcessMemory};
-use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LoadLibraryExW, LoadLibraryW,
 };
@@ -101,12 +103,7 @@ retour::static_detour! {
     static TerminateProcessHook: unsafe extern "system" fn(HANDLE, u32) -> BOOL;
     static NtTerminateProcessHook: unsafe extern "system" fn(HANDLE, u32) -> i32;
     static MessageBoxWHook: unsafe extern "system" fn(HWND, *const u16, *const u16, u32) -> i32;
-    static CreateFileWHook: unsafe extern "system" fn(
-        *const u16, u32, u32, *const SECURITY_ATTRIBUTES, u32, u32, HANDLE
-    ) -> HANDLE;
-    static WriteFileHook: unsafe extern "system" fn(
-        HANDLE, *const u8, u32, *mut u32, *mut OVERLAPPED
-    ) -> BOOL;
+    // CreateFileW and WriteFile are now in winapi_hooks.rs
     static CreateProcessWHook: unsafe extern "system" fn(
         *const u16, *mut u16, *const SECURITY_ATTRIBUTES, *const SECURITY_ATTRIBUTES,
         BOOL, u32, *const c_void, *const u16, *const STARTUPINFOW, *mut PROCESS_INFORMATION
@@ -226,17 +223,6 @@ fn hooked_message_box_w(h_wnd: HWND, text: *const u16, caption: *const u16, u_ty
     unsafe { MessageBoxWHook.call(h_wnd, text, caption, u_type) }
 }
 
-fn hooked_create_file_w(lp_file_name: *const u16, dw_desired_access: u32, dw_share_mode: u32, lp_security_attributes: *const SECURITY_ATTRIBUTES, dw_creation_disposition: u32, dw_flags_and_attributes: u32, h_template_file: HANDLE) -> HANDLE {
-    if let Some(_guard) = ReentrancyGuard::new() {
-        let file_name_str = safe_u16_str(lp_file_name);
-        log_event(LogLevel::Debug, LogEvent::ApiHook {
-            function_name: "CreateFileW".to_string(),
-            parameters: json!({ "file_name": file_name_str, "access": dw_desired_access, "disposition": dw_creation_disposition }),
-        });
-    }
-    unsafe { CreateFileWHook.call(lp_file_name, dw_desired_access, dw_share_mode, lp_security_attributes, dw_creation_disposition, dw_flags_and_attributes, h_template_file) }
-}
-
 fn hooked_connect(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
     if let Some(_guard) = ReentrancyGuard::new() {
         if !name.is_null() && namelen as u32 >= std::mem::size_of::<SOCKADDR_IN>() as u32 {
@@ -344,19 +330,6 @@ fn hooked_load_library_ex_w(lp_lib_file_name: *const u16, h_file: HANDLE, dw_fla
         });
     }
     unsafe { LoadLibraryExWHook.call(lp_lib_file_name, h_file, dw_flags) }
-}
-
-fn hooked_write_file(h_file: HANDLE, lp_buffer: *const u8, n_number_of_bytes_to_write: u32, lp_number_of_bytes_written: *mut u32, lp_overlapped: *mut OVERLAPPED) -> BOOL {
-    if let Some(_guard) = ReentrancyGuard::new() {
-        let mut file_path_buf = vec![0u16; 1024];
-        let path_len = unsafe { GetFinalPathNameByHandleW(h_file, file_path_buf.as_mut_ptr(), file_path_buf.len() as u32, 0) };
-        let file_name = if path_len > 0 { OsString::from_wide(&file_path_buf[..path_len as usize]).to_string_lossy().to_string() } else { "Unknown Handle".to_string() };
-        log_event(LogLevel::Debug, LogEvent::ApiHook {
-            function_name: "WriteFile".to_string(),
-            parameters: json!({ "file_name": file_name, "bytes_to_write": n_number_of_bytes_to_write }),
-        });
-    }
-    unsafe { WriteFileHook.call(h_file, lp_buffer, n_number_of_bytes_to_write, lp_number_of_bytes_written, lp_overlapped) }
 }
 
 fn hooked_create_process_w(lp_application_name: *const u16, lp_command_line: *mut u16, lp_process_attributes: *const SECURITY_ATTRIBUTES, lp_thread_attributes: *const SECURITY_ATTRIBUTES, b_inherit_handles: BOOL, dw_creation_flags: u32, lp_environment: *const c_void, lp_current_directory: *const u16, lp_startup_info: *const STARTUPINFOW, lp_process_information: *mut PROCESS_INFORMATION) -> BOOL {
@@ -499,8 +472,20 @@ let terminate_process_ptr: unsafe extern "system" fn(HANDLE, u32) -> BOOL = std:
 hook!(TerminateProcessHook, terminate_process_ptr, hooked_terminate_process);
 
         hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
-        hook!(CreateFileWHook, CreateFileW, hooked_create_file_w);
-        hook!(WriteFileHook, WriteFile, hooked_write_file);
+        
+        // Manual initialization for CreateFileW and WriteFile
+        CreateFileWHook.initialize(
+            CreateFileW,
+            |a,b,c,d,e,f,g| hooked_create_file_w(a,b,c,d,e,f,g)
+        ).map_err(|e| e.to_string())?;
+        CreateFileWHook.enable().map_err(|e| e.to_string())?;
+
+        WriteFileHook.initialize(
+            WriteFile,
+            |a,b,c,d,e| hooked_write_file(a,b,c,d,e)
+        ).map_err(|e| e.to_string())?;
+        WriteFileHook.enable().map_err(|e| e.to_string())?;
+
         hook!(CreateProcessWHook, CreateProcessW, hooked_create_process_w);
         hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
         hook!(LoadLibraryExWHook, LoadLibraryExW, hooked_load_library_ex_w);

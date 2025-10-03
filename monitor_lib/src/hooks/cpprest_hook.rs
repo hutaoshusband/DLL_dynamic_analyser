@@ -82,15 +82,19 @@ unsafe fn extract_wide_string(base_ptr: *const c_void, offset: isize) -> String 
 /// It intercepts the call, logs the request details, and then calls the original function.
 unsafe fn hooked_cpprest_send_request(
     this_ptr: *const c_void,
-    request_ptr: *const c_void,
+    request_ptr: *const c_void, // This is a pointer to a std::shared_ptr<http_request_impl>
 ) -> *const c_void {
+    // The request_ptr argument is a pointer to a shared_ptr. To get the actual
+    // pointer to the http_request_impl object, we need to dereference it once.
+    let actual_request_ptr = *(request_ptr as *const *const c_void);
+
     // These offsets are specific to the version of cpprestsdk being targeted
     // and may need adjustment for different versions.
     // Offsets for http_request_impl structure:
-    let method = extract_wide_string(request_ptr, 8);
-    let path = extract_wide_string(request_ptr, 32);
-    let host = extract_wide_string(request_ptr, 48);
-    let scheme = extract_wide_string(request_ptr, 16);
+    let method = extract_wide_string(actual_request_ptr, 8);
+    let path = extract_wide_string(actual_request_ptr, 32);
+    let host = extract_wide_string(actual_request_ptr, 48);
+    let scheme = extract_wide_string(actual_request_ptr, 16);
 
     log_event(LogLevel::Info, LogEvent::ApiHook {
         function_name: "cpprest_send_request".to_string(),
