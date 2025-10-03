@@ -952,10 +952,14 @@ dependencies = [
 name = "cs2_creator"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "eframe",
  "egui",
  "embed-resource",
  "rfd",
+ "serde",
+ "serde_json",
+ "widestring 0.5.1",
  "windows-sys 0.52.0",
 ]
 

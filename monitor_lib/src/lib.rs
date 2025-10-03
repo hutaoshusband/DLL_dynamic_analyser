@@ -217,12 +217,8 @@ pub extern "system" fn DllMain(
             }
         }
         DLL_PROCESS_DETACH => {
+            // Set the shutdown signal for all background threads.
             SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-
-            // Wait for the scanner thread to exit.
-            if let Some(handle) = SCANNER_THREAD_HANDLE.lock().unwrap().take() {
-                let _ = handle.join();
-            }
 
             log_event(
                 LogLevel::Info,
@@ -231,12 +227,12 @@ pub extern "system" fn DllMain(
                 },
             );
 
-            // Signal the logging thread to shut down and wait for it.
+            // Signal the logging thread to shut down. We do not wait (`join`) for
+            // the threads here, as that can cause deadlocks inside DllMain.
+            // The OS will clean up the threads when the process terminates.
             if let Some(sender) = LOG_SENDER.get() {
+                // This signals the logging thread to break its loop.
                 let _ = sender.send(None);
-            }
-            if let Some(handle) = LOGGING_THREAD_HANDLE.lock().unwrap().take() {
-                let _ = handle.join();
             }
         }
         _ => {}
