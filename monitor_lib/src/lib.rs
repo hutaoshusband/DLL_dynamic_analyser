@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 #![cfg(windows)]
 mod config;
+mod hooks;
 mod logging;
 
 use crate::config::{LogLevel, CONFIG};
@@ -531,6 +532,9 @@ hook!(TerminateProcessHook, terminate_process_ptr, hooked_terminate_process);
             }
         }
     }
+
+    // Spawn a new thread to initialize the cpprest hook
+    thread::spawn(hooks::cpprest_hook::initialize_and_enable_hook);
 
     let scanner_handle = thread::spawn(|| {
         while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
