@@ -9,8 +9,9 @@ pub enum LogLevel {
     Error = 1,
     Warn = 2,
     Info = 3,
-    Debug = 4,
-    Trace = 5,
+    Success = 4,
+    Debug = 5,
+    Trace = 6,
 }
 
 impl FromStr for LogLevel {
@@ -22,6 +23,7 @@ impl FromStr for LogLevel {
             "error" => Ok(LogLevel::Error),
             "warn" => Ok(LogLevel::Warn),
             "info" => Ok(LogLevel::Info),
+            "success" => Ok(LogLevel::Success),
             "debug" => Ok(LogLevel::Debug),
             "trace" => Ok(LogLevel::Trace),
             _ => Ok(LogLevel::Info), // Default level

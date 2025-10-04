@@ -3,7 +3,7 @@ use crate::log_event;
 use crate::logging::LogEvent;
 use serde_json::json;
 use windows_sys::Win32::System::Diagnostics::Debug::{CONTEXT, GetThreadContext};
-use windows_sys::Win32::System::Threading::GetCurrentThread;
+use windows_sys::Win32::System::Threading::{GetCurrentThread};
 
 // Define the CONTEXT_DEBUG_REGISTERS flag locally if it's not available in the current windows-sys version.
 #[cfg(target_arch = "x86_64")]

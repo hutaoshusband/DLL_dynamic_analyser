@@ -9,7 +9,7 @@ use windows_sys::Win32::System::SystemServices::{
     IMAGE_DOS_HEADER, IMAGE_IMPORT_DESCRIPTOR,
 };
 use windows_sys::Win32::System::Memory::{
-    VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_READONLY, PAGE_READWRITE
+    VirtualQuery, MEMORY_BASIC_INFORMATION
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
@@ -26,7 +26,8 @@ unsafe fn scan_module_iat(module_base: usize) {
     let nt_headers_ptr = module_base + dos_header.e_lfanew as usize;
     let nt_headers = &*(nt_headers_ptr as *const windows_sys::Win32::System::Diagnostics::Debug::IMAGE_NT_HEADERS64);
 
-    let import_dir_entry = &nt_headers.OptionalHeader.DataDirectory[1];
+    let import_dir_entry = &nt_headers.OptionalHeader.DataDirectory
+        [windows_sys::Win32::System::Diagnostics::Debug::IMAGE_DIRECTORY_ENTRY_IMPORT as usize];
     if import_dir_entry.VirtualAddress == 0 {
         return;
     }
@@ -43,7 +44,7 @@ unsafe fn scan_module_iat(module_base: usize) {
             // This is a simple heuristic for detecting hooks.
             let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
             if VirtualQuery(function_address as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0 {
-                 if mbi.AllocationBase as usize != module_base {
+                 if mbi.AllocationBase != module_base as *mut _ {
                      // This address points outside of its supposed module, which is suspicious.
                      log_event(LogLevel::Warn, LogEvent::MemoryScan {
                          status: "Potential IAT Hook Detected".to_string(),

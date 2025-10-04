@@ -81,7 +81,7 @@ impl LogEntry {
 }
 
 /// Enumerates the different types of events that can be logged.
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(tag = "event_type", content = "details")]
 pub enum LogEvent {
     Initialization {
@@ -109,6 +109,15 @@ pub enum LogEvent {
     MemoryScan {
         status: String,
         result: String,
+    },
+    VmpTrace {
+        message: String,
+        details: serde_json::Value,
+    },
+    FileOperation {
+        path: String,
+        operation: String,
+        details: String,
     },
     Error {
         source: String,

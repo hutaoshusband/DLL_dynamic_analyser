@@ -8,6 +8,7 @@ mod hooks;
 mod iat_monitor;
 mod logging;
 mod scanner;
+mod vmp_dumper;
 
 use crate::config::{LogLevel, CONFIG};
 use crate::hooks::cpprest_hook;
@@ -126,6 +127,30 @@ fn logging_thread_main(receiver: Receiver<Option<(LogLevel, LogEvent)>>) {
     }
 
     while let Ok(Some((level, event))) = receiver.recv() {
+        // First, attempt to serialize the event to see if it's a special command.
+        // We serialize it to a Value to inspect it without committing to a full log string yet.
+        if let Ok(value) = serde_json::to_value(LogEntry::new(level, event.clone())) {
+            let mut is_command = false;
+            if let Some(event_obj) = value.get("event") {
+                if let Some(details) = event_obj.get("details") {
+                     if let Some(command) = details.get("command").and_then(|c| c.as_str()) {
+                        vmp_dumper::handle_command(command);
+                        is_command = true;
+                    }
+                } else if let Some(command) = event_obj.get("command").and_then(|c| c.as_str()) {
+                    // Fallback for simpler command structures
+                    vmp_dumper::handle_command(command);
+                    is_command = true;
+                }
+            }
+
+            // If it was a command, we skip logging it to avoid clutter.
+            if is_command {
+                continue;
+            }
+        }
+        
+        // If it wasn't a command, proceed with normal logging.
         let log_entry = LogEntry::new(level, event);
         if let Ok(json_string) = serde_json::to_string(&log_entry) {
             let formatted_message = format!("{}\n", json_string);
@@ -185,6 +210,9 @@ fn dll_main_internal() -> Result<(), String> {
     unsafe {
         initialize_all_hooks()?;
     }
+
+    // Start the VMP dumper's background monitoring thread.
+    vmp_dumper::start_vmp_monitoring();
 
     // Spawn a thread for the cpprest hook.
     thread::spawn(cpprest_hook::initialize_and_enable_hook);

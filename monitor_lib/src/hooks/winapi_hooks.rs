@@ -2,7 +2,6 @@ use crate::config::{LogLevel, CONFIG};
 use crate::logging::{capture_stack_trace, LogEvent};
 use crate::log_event;
 use crate::ReentrancyGuard;
-use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use retour::static_detour;
 use serde_json::json;
@@ -15,17 +14,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use widestring::U16CStr;
 
-#[derive(Debug, Clone)]
-struct AllocInfo {
-    address: usize,
-    size: usize,
-    protection: u32,
-    timestamp: DateTime<Utc>,
-    stack_trace: Vec<String>,
-}
-
-static ALLOCATED_REGIONS: Lazy<Mutex<HashMap<usize, AllocInfo>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+// The AllocInfo struct and ALLOCATED_REGIONS static are now managed by the vmp_dumper module.
 
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND};
 use windows_sys::Win32::Networking::WinSock::{
@@ -663,14 +652,14 @@ pub unsafe fn hooked_virtual_alloc_ex(
     if !result.is_null() {
         if let Some(_guard) = ReentrancyGuard::new() {
             let stack_trace = capture_stack_trace(CONFIG.stack_trace_frame_limit);
-            let info = AllocInfo {
-                address: result as usize,
-                size: dw_size,
-                protection: fl_protect,
-                timestamp: Utc::now(),
-                stack_trace: stack_trace.clone(),
-            };
-            ALLOCATED_REGIONS.lock().unwrap().insert(result as usize, info);
+            
+            // Forward allocation info to the VMP dumper module.
+            crate::vmp_dumper::track_memory_allocation(
+                result as usize,
+                dw_size,
+                fl_protect,
+                stack_trace.clone(),
+            );
 
             log_event(LogLevel::Info, LogEvent::ApiHook {
                 function_name: "VirtualAllocEx".to_string(),

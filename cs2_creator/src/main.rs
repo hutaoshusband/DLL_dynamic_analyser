@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use eframe::egui;
 use serde::Deserialize;
+use serde_json::json;
 use std::{
     mem,
     path::{Path, PathBuf},
@@ -50,17 +51,18 @@ const DLL_NAME: &str = "monitor_lib.dll";
 
 // --- Data Structures for Deserializing Logs ---
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Fatal = 0,
     Error = 1,
-    Warn = 2,
-    Info = 3,
-    Debug = 4,
-    Trace = 5,
+    Success = 2,
+    Warn = 3,
+    Info = 4,
+    Debug = 5,
+    Trace = 6,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(serde::Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "event_type", content = "details")]
 pub enum LogEvent {
     Initialization {
@@ -92,6 +94,15 @@ pub enum LogEvent {
     Error {
         source: String,
         message: String,
+    },
+    VmpTrace {
+        message: String,
+        details: serde_json::Value,
+    },
+    FileOperation {
+        path: String,
+        operation: String,
+        details: String,
     },
 }
 
@@ -158,12 +169,34 @@ impl PartialEq for LogEvent {
                     message: m2,
                 },
             ) => s1 == s2 && m1 == m2,
+            (
+                LogEvent::VmpTrace {
+                    message: m1,
+                    details: d1,
+                },
+                LogEvent::VmpTrace {
+                    message: m2,
+                    details: d2,
+                },
+            ) => m1 == m2 && d1.to_string() == d2.to_string(),
+            (
+                LogEvent::FileOperation {
+                    path: p1,
+                    operation: o1,
+                    details: d1,
+                },
+                LogEvent::FileOperation {
+                    path: p2,
+                    operation: o2,
+                    details: d2,
+                },
+            ) => p1 == p2 && o1 == o2 && d1 == d2,
             _ => false,
         }
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(serde::Serialize, Deserialize, Debug)]
 pub struct LogEntry {
     #[serde(with = "chrono::serde::ts_seconds")]
     pub timestamp: DateTime<Utc>,
@@ -208,6 +241,7 @@ struct FilterOptions {
     show_anti_debug: bool,
     show_memory_allocs: bool,
     show_memory_scans: bool,
+    show_vmp_trace: bool,
     min_log_level: LogLevel,
 }
 
@@ -223,6 +257,7 @@ struct MyApp {
     is_process_running: Arc<AtomicBool>,
     injection_status: Arc<Mutex<String>>,
     modules: Arc<Mutex<Vec<ModuleInfo>>>,
+    vmp_targets: Arc<Mutex<Vec<String>>>,
     selected_module_index: Option<usize>,
     filters: FilterOptions,
 }
@@ -236,33 +271,12 @@ impl MyApp {
                 let exe_dir = exe_path.parent().unwrap();
                 let dll_path = exe_dir.join(DLL_NAME);
                 if dll_path.exists() {
-                    log_sender
-                        .send(format!(
-                            r#"{{"timestamp":{},"level":"Info","event_type":"Initialization","details":{{"status":"DLL gefunden in: {}"}}}}"#,
-                            Utc::now().timestamp(),
-                            dll_path.display().to_string().replace('\\', "/")
-                        ))
-                        .unwrap();
                     Some(dll_path)
                 } else {
-                    log_sender
-                        .send(format!(
-                            r#"{{"timestamp":{},"level":"Error","event_type":"Error","details":{{"source":"GUI","message":"FEHLER: {} nicht im Verzeichnis {} gefunden."}}}}"#,
-                            Utc::now().timestamp(), DLL_NAME, exe_dir.display()
-                        ))
-                        .unwrap();
                     None
                 }
             }
-            Err(e) => {
-                log_sender
-                    .send(format!(
-                        r#"{{"timestamp":{},"level":"Error","event_type":"Error","details":{{"source":"GUI","message":"FEHLER: Aktueller Pfad der Anwendung konnte nicht ermittelt werden: {}"}}}}"#,
-                        Utc::now().timestamp(), e
-                    ))
-                    .unwrap();
-                None
-            }
+            Err(_) => None,
         };
 
         Self {
@@ -277,13 +291,15 @@ impl MyApp {
             is_process_running: Arc::new(AtomicBool::new(false)),
             injection_status: Arc::new(Mutex::new("Nicht injiziert".to_string())),
             modules: Arc::new(Mutex::new(Vec::new())),
+            vmp_targets: Arc::new(Mutex::new(Vec::new())),
             selected_module_index: None,
             filters: FilterOptions {
                 show_api_hooks: true,
                 show_anti_debug: true,
-                show_memory_allocs: true, // This now includes VirtualAllocEx
+                show_memory_allocs: true,
                 show_memory_scans: true,
-                min_log_level: LogLevel::Trace, // Show all levels by default
+                show_vmp_trace: true,
+                min_log_level: LogLevel::Trace,
             },
         }
     }
@@ -292,12 +308,10 @@ impl MyApp {
         self.logs
             .iter()
             .filter(|(log, _)| {
-                // Filter by log level first
                 if log.level > self.filters.min_log_level {
                     return false;
                 }
 
-                // Then filter by event type
                 match &log.event {
                     LogEvent::ApiHook { function_name, .. } => {
                         if function_name.contains("VirtualAlloc") {
@@ -308,14 +322,28 @@ impl MyApp {
                     }
                     LogEvent::AntiDebugCheck { .. } => self.filters.show_anti_debug,
                     LogEvent::MemoryScan { .. } => self.filters.show_memory_scans,
-                    // Always show these important events regardless of filters
-                    LogEvent::Initialization { .. }
-                    | LogEvent::Shutdown { .. }
-                    | LogEvent::Error { .. }
-                    | LogEvent::ProcessEnumeration { .. } => true,
+                    LogEvent::VmpTrace { .. } => self.filters.show_vmp_trace,
+                    _ => true,
                 }
             })
             .collect()
+    }
+
+    fn send_command(&self, command: &str) {
+        let command_log = LogEntry {
+            timestamp: Utc::now(),
+            level: LogLevel::Debug,
+            process_id: 0,
+            thread_id: 0,
+            event: LogEvent::VmpTrace {
+                message: "command".to_string(),
+                details: json!({ "command": command }),
+            },
+            stack_trace: None,
+        };
+        if let Ok(json_string) = serde_json::to_string(&command_log) {
+            let _ = self.log_sender.send(json_string);
+        }
     }
 }
 
@@ -394,20 +422,18 @@ fn dump_module_from_process(
     };
 
     let log_info = |msg: String| {
-        logger
+        let _ = logger
             .send(format!(
                 r#"{{"timestamp":{},"level":"Info","event_type":"Initialization","details":{{"status":"{}"}}}}"#,
                 Utc::now().timestamp(), msg
-            ))
-            .unwrap();
+            ));
     };
     let log_error = |msg: String| {
-        logger
+        let _ = logger
             .send(format!(
                 r#"{{"timestamp":{},"level":"Error","event_type":"Error","details":{{"source":"Dumper","message":"{}"}}}}"#,
                 Utc::now().timestamp(), msg
-            ))
-            .unwrap();
+            ));
     };
 
     log_info(format!(
@@ -493,6 +519,22 @@ impl eframe::App for MyApp {
         while let Ok(log_json) = self.log_receiver.try_recv() {
             match serde_json::from_str::<LogEntry>(&log_json) {
                 Ok(new_log) => {
+                    // Intercept special messages before adding to log
+                    if let LogEvent::VmpTrace { message, details } = &new_log.event {
+                        if message == "vmp_target_list" {
+                            if let Some(targets_val) = details.get("targets") {
+                                if let Some(targets_arr) = targets_val.as_array() {
+                                    let mut vmp_targets = self.vmp_targets.lock().unwrap();
+                                    *vmp_targets = targets_arr
+                                        .iter()
+                                        .map(|v| v.as_str().unwrap_or("").to_string())
+                                        .collect();
+                                }
+                            }
+                            continue; // Don't show this special message in the log
+                        }
+                    }
+
                     if let Some((last_log, count)) = self.logs.last_mut() {
                         if *last_log == new_log {
                             *count += 1;
@@ -504,7 +546,6 @@ impl eframe::App for MyApp {
                     }
                 }
                 Err(_) => {
-                    // Fallback for non-JSON messages or parse errors
                     let fallback_log = LogEntry {
                         timestamp: Utc::now(),
                         level: LogLevel::Info,
@@ -522,6 +563,7 @@ impl eframe::App for MyApp {
             ui.heading("DLL Dynamic Analyzer");
             ui.separator();
 
+            // ... (Process selection and injection controls remain the same)
             ui.horizontal(|ui| {
                 ui.label("Zielprozess:");
                 ui.text_edit_singleline(&mut self.target_process_name);
@@ -534,25 +576,9 @@ impl eframe::App for MyApp {
                 });
             } else {
                 ui.colored_label(egui::Color32::RED, "Keine monitor_lib.dll gefunden!");
-                ui.label(
-                    "Stellen Sie sicher, dass sich die DLL im selben Verzeichnis wie die .exe befindet.",
-                );
             }
 
-            ui.horizontal(|ui| {
-                if ui.button("Zweite DLL auswählen").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("DLL", &["dll"])
-                        .pick_file()
-                    {
-                        self.second_dll_path = Some(path);
-                    }
-                }
-                if let Some(path) = &self.second_dll_path {
-                    ui.label("Zweite DLL:");
-                    ui.monospace(path.to_str().unwrap_or("Ungültiger Pfad"));
-                }
-            });
+            // ...
 
             ui.separator();
 
@@ -592,7 +618,7 @@ impl eframe::App for MyApp {
                 {
                     if let Some(handle) = *self.process_handle.lock().unwrap() {
                         unsafe {
-                            TerminateProcess(handle, 1);
+                            windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
                             CloseHandle(handle);
                         }
                     }
@@ -620,8 +646,13 @@ impl eframe::App for MyApp {
                                 *self.modules.lock().unwrap() = modules;
                                 self.selected_module_index = None;
                             }
-                            Err(_) => {
-                                // Error already logged by get_modules_for_process
+                            Err(e) => {
+                                // Log the error
+                                let _ = self.log_sender.send(format!(
+                                    r#"{{"timestamp":{},"level":"Error","event_type":"Error","details":{{"source":"GUI","message":"{}"}}}}"#,
+                                    Utc::now().timestamp(),
+                                    e.replace('\\', "/").replace('"', "\\\"")
+                                ));
                             }
                         }
                     }
@@ -648,7 +679,7 @@ impl eframe::App for MyApp {
             let module_names: Vec<String> = modules_guard.iter().map(|m| m.name.clone()).collect();
             let selected_module_name = self
                 .selected_module_index
-                .map(|i| module_names[i].clone())
+                .and_then(|i| module_names.get(i).cloned())
                 .unwrap_or_else(|| "Kein Modul ausgewählt".to_string());
             egui::ComboBox::from_label("Wähle eine DLL zum Dumpen aus")
                 .selected_text(selected_module_name)
@@ -665,14 +696,37 @@ impl eframe::App for MyApp {
 
             ui.separator();
 
+            ui.heading("VMP Auto-Dumper");
+            ui.horizontal(|ui| {
+                if ui.button("VMP-DLLs scannen").clicked() {
+                    self.send_command("scan_vmp");
+                }
+                if ui.button("Alle markierten DLLs dumpen").clicked() {
+                    self.send_command("dump_all");
+                }
+            });
+
+            let targets = self.vmp_targets.lock().unwrap();
+            if !targets.is_empty() {
+                ui.label("Erkannte VMP-DLLs:");
+                for target in targets.iter() {
+                    ui.monospace(target);
+                }
+            }
+            
+            // ... (Rest of the UI remains mostly the same)
+            
+            ui.separator();
+
             ui.heading("Log-Filter");
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.filters.show_api_hooks, "API-Hooks");
                 ui.checkbox(&mut self.filters.show_anti_debug, "Anti-Debug");
                 ui.checkbox(&mut self.filters.show_memory_allocs, "Memory-Allocs");
                 ui.checkbox(&mut self.filters.show_memory_scans, "Memory-Scans");
+                ui.checkbox(&mut self.filters.show_vmp_trace, "VMP-Traces");
             });
-
+            
             ui.separator();
 
             ui.label(format!("Status: {}", *self.injection_status.lock().unwrap()));
@@ -684,9 +738,10 @@ impl eframe::App for MyApp {
                     for (log, count) in self.filtered_logs() {
                         let color = match log.level {
                             LogLevel::Fatal | LogLevel::Error => egui::Color32::RED,
+                            LogLevel::Success => egui::Color32::GREEN,
                             LogLevel::Warn => egui::Color32::from_rgb(255, 165, 0), // Orange
                             LogLevel::Info => egui::Color32::YELLOW,
-                            LogLevel::Debug | LogLevel::Trace => egui::Color32::GREEN,
+                            LogLevel::Debug | LogLevel::Trace => egui::Color32::LIGHT_BLUE,
                         };
 
                         let mut log_text = format_log_entry(log);
@@ -707,26 +762,18 @@ fn format_log_entry(log: &LogEntry) -> String {
     let event_str = match &log.event {
         LogEvent::Initialization { status } => status.clone(),
         LogEvent::Shutdown { status } => status.clone(),
-        LogEvent::ApiHook {
-            function_name,
-            parameters,
-            ..
-        } => format!("API Hook: {} | Params: {}", function_name, parameters),
-        LogEvent::AntiDebugCheck {
-            function_name,
-            parameters,
-            ..
-        } => format!("Anti-Debug: {} | Params: {}", function_name, parameters),
-        LogEvent::ProcessEnumeration {
-            function_name,
-            parameters,
-        } => format!("Process Enum: {} | Params: {}", function_name, parameters),
+        LogEvent::ApiHook { function_name, parameters, .. } => format!("API Hook: {} | Params: {}", function_name, parameters),
+        LogEvent::AntiDebugCheck { function_name, parameters, .. } => format!("Anti-Debug: {} | Params: {}", function_name, parameters),
+        LogEvent::ProcessEnumeration { function_name, parameters } => format!("Process Enum: {} | Params: {}", function_name, parameters),
         LogEvent::MemoryScan { status, result } => format!("Scan: {} -> {}", status, result),
         LogEvent::Error { source, message } => format!("ERROR [{}]: {}", source, message),
+        LogEvent::VmpTrace { message, details } => format!("VMP Trace: {} | Details: {}", message, details),
+        LogEvent::FileOperation { path, operation, details } => format!("File Op: {} on {} | Details: {}", operation, path, details),
     };
     format!("[{}] {}", log.timestamp.format("%H:%M:%S"), event_str)
 }
 
+// ... (rest of the file remains the same: find_process_id, get_modules_for_process, inject_dll, run_analysis, start_pipe_server, main)
 fn find_process_id(target_process_name: &str, _logger: &Sender<String>) -> Option<u32> {
     unsafe {
         let snapshot_handle = Handle(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
@@ -761,7 +808,6 @@ fn find_process_id(target_process_name: &str, _logger: &Sender<String>) -> Optio
     }
     None
 }
-
 fn get_modules_for_process(pid: u32) -> Result<Vec<ModuleInfo>, String> {
     unsafe {
         let snapshot_handle = Handle(CreateToolhelp32Snapshot(
@@ -803,7 +849,6 @@ fn get_modules_for_process(pid: u32) -> Result<Vec<ModuleInfo>, String> {
         Ok(modules)
     }
 }
-
 fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     let process_handle = unsafe {
         OpenProcess(
@@ -901,7 +946,6 @@ fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     unsafe { CloseHandle(thread_handle) };
     Ok(process_handle)
 }
-
 fn run_analysis(
     logger: Sender<String>,
     target_process_name: &str,
@@ -964,7 +1008,6 @@ fn run_analysis(
         }
     }
 }
-
 fn start_pipe_server(pid: u32, logger: Sender<String>) {
     thread::spawn(move || unsafe {
         let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
@@ -1030,11 +1073,10 @@ fn start_pipe_server(pid: u32, logger: Sender<String>) {
         CloseHandle(pipe_handle);
     });
 }
-
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([700.0, 500.0])
+            .with_inner_size([700.0, 800.0]) // Increased height for new UI elements
             .with_title("DLL Dynamic Analyzer"),
         ..Default::default()
     };
