@@ -123,4 +123,9 @@ pub enum LogEvent {
         source: String,
         message: String,
     },
+    YaraMatch {
+        module_path: String,
+        rule_name: String,
+        scan_details: serde_json::Value,
+    },
 }
