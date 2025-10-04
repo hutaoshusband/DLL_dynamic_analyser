@@ -2,26 +2,43 @@ use crate::config::{LogLevel, CONFIG};
 use crate::logging::{capture_stack_trace, LogEvent};
 use crate::log_event;
 use crate::ReentrancyGuard;
+use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use retour::static_detour;
 use serde_json::json;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::slice;
 use std::sync::Mutex;
 use std::thread;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use widestring::U16CStr;
+
+#[derive(Debug, Clone)]
+struct AllocInfo {
+    address: usize,
+    size: usize,
+    protection: u32,
+    timestamp: DateTime<Utc>,
+    stack_trace: Vec<String>,
+}
+
+static ALLOCATED_REGIONS: Lazy<Mutex<HashMap<usize, AllocInfo>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND};
 use windows_sys::Win32::Networking::WinSock::{
     inet_ntoa, ADDRINFOW, AF_INET, IN_ADDR, SOCKADDR, SOCKADDR_IN, SOCKET,
 };
+use windows_sys::Win32::Security::Cryptography::{CryptDecrypt, CryptEncrypt};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DeleteFileW, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    CheckRemoteDebuggerPresent, IsDebuggerPresent, WriteProcessMemory,
+    AddVectoredExceptionHandler, CheckRemoteDebuggerPresent, IsDebuggerPresent,
+    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -35,15 +52,17 @@ use windows_sys::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, ExitProcess, OpenProcess,
-    LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, STARTUPINFOW, THREAD_CREATION_FLAGS,
-    TerminateProcess,
+    CreateProcessW, CreateRemoteThread, CreateThread, ExitProcess, OpenProcess,
+    LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW, STARTUPINFOW, THREAD_CREATION_FLAGS, TerminateProcess,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 
 type HINTERNET = isize;
 type NTSTATUS = i32;
 type PROCESSINFOCLASS = u32;
+type HCRYPTKEY = usize;
+type HCRYPTHASH = usize;
 
 static LAST_IS_DEBUGGER_PRESENT_LOG: Lazy<Mutex<Option<Instant>>> =
     Lazy::new(|| Mutex::new(None));
@@ -130,6 +149,20 @@ static_detour! {
     pub static Process32FirstWHook: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL;
     pub static Process32NextWHook: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL;
     pub static ExitProcessHook: unsafe extern "system" fn(u32) -> !;
+
+    // New hooks for VMP analysis
+    pub static AddVectoredExceptionHandlerHook: unsafe extern "system" fn(u32, PVECTORED_EXCEPTION_HANDLER) -> *mut c_void;
+    pub static CreateThreadHook: unsafe extern "system" fn(
+        *const SECURITY_ATTRIBUTES, usize, LPTHREAD_START_ROUTINE,
+        *const c_void, u32, *mut u32
+    ) -> HANDLE;
+    pub static FreeLibraryHook: unsafe extern "system" fn(HINSTANCE) -> BOOL;
+    pub static CryptEncryptHook: unsafe extern "system" fn(
+        HCRYPTKEY, HCRYPTHASH, BOOL, u32, *mut u8, *mut u32, u32
+    ) -> BOOL;
+    pub static CryptDecryptHook: unsafe extern "system" fn(
+        HCRYPTKEY, HCRYPTHASH, BOOL, u32, *mut u8, *mut u32
+    ) -> BOOL;
 }
 
 pub fn hooked_is_debugger_present() -> BOOL {
@@ -527,15 +560,58 @@ pub fn hooked_delete_file_w(lp_file_name: *const u16) -> BOOL {
     unsafe { DeleteFileWHook.call(lp_file_name) }
 }
 
+/// Gets the name of a process from its PID.
+fn get_process_name_by_pid(pid: u32) -> String {
+    if pid == 0 {
+        return "<system_idle>".to_string();
+    }
+    // NOTE: The current process PID is `std::process::id()`. If we are opening our own process,
+    // we can use a more direct way to get the name, but this is a general function.
+
+    // Open the process with limited query rights.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+
+    if handle == 0 {
+        // This can happen if the process has already exited, or if we lack permissions.
+        // For high-privilege processes, we might not be able to open them.
+        return format!("<pid: {}>", pid);
+    }
+
+    let mut buffer: [u16; 1024] = [0; 1024];
+    let mut size = buffer.len() as u32;
+
+    let result = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size) };
+
+    unsafe {
+        windows_sys::Win32::Foundation::CloseHandle(handle);
+    }
+
+    if result == 0 {
+        // Failed to get the process name.
+        return format!("<pid: {}, error getting name>", pid);
+    }
+
+    let process_name_path = String::from_utf16_lossy(&buffer[..size as usize]);
+
+    // Extract just the executable name from the full path for cleaner logs.
+    Path::new(&process_name_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or(process_name_path) // Fallback to full path if parsing fails.
+}
+
 pub unsafe fn hooked_open_process(
     dw_desired_access: u32,
     b_inherit_handle: BOOL,
     dw_process_id: u32,
 ) -> HANDLE {
+    let target_name = get_process_name_by_pid(dw_process_id);
     log_event(LogLevel::Warn, LogEvent::ApiHook {
         function_name: "OpenProcess".to_string(),
         parameters: json!({
             "target_pid": dw_process_id,
+            "target_name": target_name,
             "desired_access": dw_desired_access,
         }),
         stack_trace: None,
@@ -576,25 +652,40 @@ pub unsafe fn hooked_virtual_alloc_ex(
     fl_allocation_type: u32,
     fl_protect: u32,
 ) -> *mut c_void {
-    // Log only potentially suspicious allocations
-    if (fl_allocation_type & MEM_COMMIT != 0) && (fl_protect & PAGE_EXECUTE_READWRITE != 0) {
-        log_event(LogLevel::Warn, LogEvent::ApiHook {
-            function_name: "VirtualAllocEx".to_string(),
-            parameters: json!({
-                "target_process_handle": h_process as usize,
-                "size": dw_size,
-                "protection": "PAGE_EXECUTE_READWRITE",
-            }),
-            stack_trace: None,
-        });
-    }
-    VirtualAllocExHook.call(
+    let result = VirtualAllocExHook.call(
         h_process,
         lp_address,
         dw_size,
         fl_allocation_type,
         fl_protect,
-    )
+    );
+
+    if !result.is_null() {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            let stack_trace = capture_stack_trace(CONFIG.stack_trace_frame_limit);
+            let info = AllocInfo {
+                address: result as usize,
+                size: dw_size,
+                protection: fl_protect,
+                timestamp: Utc::now(),
+                stack_trace: stack_trace.clone(),
+            };
+            ALLOCATED_REGIONS.lock().unwrap().insert(result as usize, info);
+
+            log_event(LogLevel::Info, LogEvent::ApiHook {
+                function_name: "VirtualAllocEx".to_string(),
+                parameters: json!({
+                    "process_handle": h_process as usize,
+                    "address": result as usize,
+                    "size": dw_size,
+                    "protection": format!("{:#X}", fl_protect),
+                }),
+                stack_trace: Some(stack_trace),
+            });
+        }
+    }
+
+    result
 }
 
 pub fn hooked_create_remote_thread(
@@ -682,6 +773,135 @@ pub fn hooked_create_process_w(
             lp_process_information,
         )
     }
+}
+
+pub unsafe fn hooked_add_vectored_exception_handler(
+    first: u32,
+    handler: PVECTORED_EXCEPTION_HANDLER,
+) -> *mut c_void {
+    log_event(LogLevel::Warn, LogEvent::ApiHook {
+        function_name: "AddVectoredExceptionHandler".to_string(),
+        parameters: json!({
+            "handler_address": handler.map_or(0, |h| h as usize),
+            "is_first": first != 0,
+        }),
+        stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+    });
+
+    AddVectoredExceptionHandlerHook.call(first, handler)
+}
+
+pub unsafe fn hooked_create_thread(
+    attrs: *const SECURITY_ATTRIBUTES,
+    stack_size: usize,
+    start_addr: LPTHREAD_START_ROUTINE,
+    param: *const c_void,
+    flags: u32,
+    thread_id: *mut u32,
+) -> HANDLE {
+    log_event(LogLevel::Info, LogEvent::ApiHook {
+        function_name: "CreateThread".to_string(),
+        parameters: json!({
+            "start_address": start_addr.map_or(0, |f| f as usize),
+            "flags": flags,
+        }),
+        stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+    });
+
+    CreateThreadHook.call(attrs, stack_size, start_addr, param, flags, thread_id)
+}
+
+pub unsafe fn hooked_free_library(module: HINSTANCE) -> BOOL {
+    log_event(LogLevel::Info, LogEvent::ApiHook {
+        function_name: "FreeLibrary".to_string(),
+        parameters: json!({
+            "module_handle": module as usize,
+        }),
+        stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+    });
+
+    FreeLibraryHook.call(module)
+}
+
+pub unsafe fn hooked_crypt_encrypt(
+    key: HCRYPTKEY,
+    hash: HCRYPTHASH,
+    final_op: BOOL,
+    flags: u32,
+    data: *mut u8,
+    data_len: *mut u32,
+    buffer_len: u32,
+) -> BOOL {
+    let len = if !data_len.is_null() { *data_len } else { 0 };
+
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(LogLevel::Info, LogEvent::ApiHook {
+            function_name: "CryptEncrypt".to_string(),
+            parameters: json!({
+                "data_length_before": len,
+                "data_preview": format_buffer_preview(data, len),
+            }),
+            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+        });
+    }
+
+    let result = CryptEncryptHook.call(key, hash, final_op, flags, data, data_len, buffer_len);
+
+    if result != 0 {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            let len_after = if !data_len.is_null() { *data_len } else { 0 };
+            log_event(LogLevel::Info, LogEvent::ApiHook {
+                function_name: "CryptEncrypt (Post-call)".to_string(),
+                parameters: json!({
+                    "data_length_after": len_after,
+                    "encrypted_data_preview": format_buffer_preview(data, len_after),
+                }),
+                stack_trace: None,
+            });
+        }
+    }
+
+    result
+}
+
+pub unsafe fn hooked_crypt_decrypt(
+    key: HCRYPTKEY,
+    hash: HCRYPTHASH,
+    final_op: BOOL,
+    flags: u32,
+    data: *mut u8,
+    data_len: *mut u32,
+) -> BOOL {
+    let len = if !data_len.is_null() { *data_len } else { 0 };
+
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(LogLevel::Info, LogEvent::ApiHook {
+            function_name: "CryptDecrypt".to_string(),
+            parameters: json!({
+                "data_length_before": len,
+                "encrypted_data_preview": format_buffer_preview(data, len),
+            }),
+            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+        });
+    }
+
+    let result = CryptDecryptHook.call(key, hash, final_op, flags, data, data_len);
+
+    if result != 0 {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            let len_after = if !data_len.is_null() { *data_len } else { 0 };
+            log_event(LogLevel::Info, LogEvent::ApiHook {
+                function_name: "CryptDecrypt (Post-call)".to_string(),
+                parameters: json!({
+                    "data_length_after": len_after,
+                    "decrypted_data_preview": format_buffer_preview(data, len_after),
+                }),
+                stack_trace: None,
+            });
+        }
+    }
+
+    result
 }
 
 macro_rules! hook {
@@ -775,6 +995,7 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
     hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
     hook!(LoadLibraryExWHook, LoadLibraryExW, hooked_load_library_ex_w);
 
+
     // Hook registry functions.
     hook!(
         RegCreateKeyExWHook,
@@ -794,6 +1015,14 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
         CreateRemoteThreadHook,
         CreateRemoteThread,
         hooked_create_remote_thread
+    );
+    hook!(CreateThreadHook, CreateThread, |a, b, c, d, e, f| hooked_create_thread(a, b, c, d, e, f));
+
+    // Hook exception handling
+    hook!(
+        AddVectoredExceptionHandlerHook,
+        AddVectoredExceptionHandler,
+        |a, b| hooked_add_vectored_exception_handler(a, b)
     );
 
     initialize_dynamic_hooks()?;
@@ -867,5 +1096,33 @@ unsafe fn initialize_dynamic_hooks() -> Result<(), String> {
             );
         }
     }
+
+    let kernel32_name: Vec<u16> = "kernel32.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    let kernel32 = GetModuleHandleW(kernel32_name.as_ptr());
+    if kernel32 != 0 {
+        if let Some(addr) = GetProcAddress(kernel32, b"FreeLibrary\0".as_ptr()) {
+            hook!(FreeLibraryHook, std::mem::transmute(addr), |a| hooked_free_library(a));
+        }
+    }
+
+    let advapi32_name: Vec<u16> = "advapi32.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    let advapi32 = GetModuleHandleW(advapi32_name.as_ptr());
+    if advapi32 != 0 {
+        if let Some(addr) = GetProcAddress(advapi32, b"CryptEncrypt\0".as_ptr()) {
+            hook!(
+                CryptEncryptHook,
+                std::mem::transmute(addr),
+                |a, b, c, d, e, f, g| hooked_crypt_encrypt(a, b, c, d, e, f, g)
+            );
+        }
+        if let Some(addr) = GetProcAddress(advapi32, b"CryptDecrypt\0".as_ptr()) {
+            hook!(
+                CryptDecryptHook,
+                std::mem::transmute(addr),
+                |a, b, c, d, e, f| hooked_crypt_decrypt(a, b, c, d, e, f)
+            );
+        }
+    }
+
     Ok(())
 }

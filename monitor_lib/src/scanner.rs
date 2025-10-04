@@ -12,7 +12,9 @@ use windows_sys::Win32::System::Memory::{
     VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_EXECUTE_READ,
     PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
 };
-use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
+use windows_sys::Win32::System::SystemServices::{
+    IMAGE_DOS_HEADER, IMAGE_TLS_DIRECTORY64,
+};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// Gets a slice representing the memory of the main executable module.
@@ -115,5 +117,37 @@ pub fn scan_for_manual_mapping() {
             }
             current_address = mem_info.BaseAddress as usize + mem_info.RegionSize;
         }
+    }
+}
+
+/// Scans the PE header of a given module for TLS callbacks.
+pub unsafe fn scan_tls_callbacks(module_base: usize) {
+    let dos_header = &*(module_base as *const IMAGE_DOS_HEADER);
+    if dos_header.e_magic != 0x5A4D {
+        return;
+    }
+
+    let nt_headers_ptr = module_base + dos_header.e_lfanew as usize;
+    let nt_headers = &*(nt_headers_ptr as *const IMAGE_NT_HEADERS64);
+
+    let tls_dir_entry = &nt_headers.OptionalHeader.DataDirectory[9 as usize];
+    if tls_dir_entry.VirtualAddress == 0 {
+        return;
+    }
+
+    let tls_dir = (module_base + tls_dir_entry.VirtualAddress as usize) as *const IMAGE_TLS_DIRECTORY64;
+    let mut callback_addr = (*tls_dir).AddressOfCallBacks as *const usize;
+
+    // Callbacks are stored in a null-terminated array of pointers.
+    if callback_addr.is_null() {
+        return;
+    }
+
+    while *callback_addr != 0 {
+        log_event(LogLevel::Warn, LogEvent::MemoryScan {
+            status: "TLS Callback Found".to_string(),
+            result: format!("Module: {:#X}, Callback Address: {:#X}", module_base, *callback_addr),
+        });
+        callback_addr = callback_addr.add(1);
     }
 }

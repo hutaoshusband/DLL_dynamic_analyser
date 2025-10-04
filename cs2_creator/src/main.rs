@@ -203,6 +203,14 @@ struct ModuleInfo {
     size: u32,
 }
 
+struct FilterOptions {
+    show_api_hooks: bool,
+    show_anti_debug: bool,
+    show_memory_allocs: bool,
+    show_memory_scans: bool,
+    min_log_level: LogLevel,
+}
+
 struct MyApp {
     target_process_name: String,
     dll_path: Option<PathBuf>,
@@ -216,6 +224,7 @@ struct MyApp {
     injection_status: Arc<Mutex<String>>,
     modules: Arc<Mutex<Vec<ModuleInfo>>>,
     selected_module_index: Option<usize>,
+    filters: FilterOptions,
 }
 
 impl MyApp {
@@ -269,7 +278,44 @@ impl MyApp {
             injection_status: Arc::new(Mutex::new("Nicht injiziert".to_string())),
             modules: Arc::new(Mutex::new(Vec::new())),
             selected_module_index: None,
+            filters: FilterOptions {
+                show_api_hooks: true,
+                show_anti_debug: true,
+                show_memory_allocs: true, // This now includes VirtualAllocEx
+                show_memory_scans: true,
+                min_log_level: LogLevel::Trace, // Show all levels by default
+            },
         }
+    }
+
+    fn filtered_logs(&self) -> Vec<&(LogEntry, usize)> {
+        self.logs
+            .iter()
+            .filter(|(log, _)| {
+                // Filter by log level first
+                if log.level > self.filters.min_log_level {
+                    return false;
+                }
+
+                // Then filter by event type
+                match &log.event {
+                    LogEvent::ApiHook { function_name, .. } => {
+                        if function_name.contains("VirtualAlloc") {
+                            self.filters.show_memory_allocs
+                        } else {
+                            self.filters.show_api_hooks
+                        }
+                    }
+                    LogEvent::AntiDebugCheck { .. } => self.filters.show_anti_debug,
+                    LogEvent::MemoryScan { .. } => self.filters.show_memory_scans,
+                    // Always show these important events regardless of filters
+                    LogEvent::Initialization { .. }
+                    | LogEvent::Shutdown { .. }
+                    | LogEvent::Error { .. }
+                    | LogEvent::ProcessEnumeration { .. } => true,
+                }
+            })
+            .collect()
     }
 }
 
@@ -619,13 +665,23 @@ impl eframe::App for MyApp {
 
             ui.separator();
 
+            ui.heading("Log-Filter");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.filters.show_api_hooks, "API-Hooks");
+                ui.checkbox(&mut self.filters.show_anti_debug, "Anti-Debug");
+                ui.checkbox(&mut self.filters.show_memory_allocs, "Memory-Allocs");
+                ui.checkbox(&mut self.filters.show_memory_scans, "Memory-Scans");
+            });
+
+            ui.separator();
+
             ui.label(format!("Status: {}", *self.injection_status.lock().unwrap()));
             ui.add_space(10.0);
             ui.label("Logs:");
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    for (log, count) in &self.logs {
+                    for (log, count) in self.filtered_logs() {
                         let color = match log.level {
                             LogLevel::Fatal | LogLevel::Error => egui::Color32::RED,
                             LogLevel::Warn => egui::Color32::from_rgb(255, 165, 0), // Orange

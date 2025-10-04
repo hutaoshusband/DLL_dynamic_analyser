@@ -1,8 +1,11 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 #![cfg(windows)]
 
+mod code_monitor;
 mod config;
+mod hardware_bp;
 mod hooks;
+mod iat_monitor;
 mod logging;
 mod scanner;
 
@@ -189,8 +192,14 @@ fn dll_main_internal() -> Result<(), String> {
     // Spawn the memory scanner thread.
     let scanner_handle = thread::spawn(|| {
         while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
-            scanner::scan_for_manual_mapping();
-            for _ in 0..600 {
+            unsafe {
+                scanner::scan_for_manual_mapping();
+                code_monitor::monitor_code_modifications();
+                hardware_bp::check_debug_registers();
+                iat_monitor::scan_iat_modifications();
+            }
+            // Sleep for a bit to avoid excessive CPU usage.
+            for _ in 0..100 { // e.g. sleep for 10 seconds
                 if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
                     break;
                 }
