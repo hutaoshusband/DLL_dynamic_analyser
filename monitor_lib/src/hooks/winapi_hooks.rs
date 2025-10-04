@@ -2,11 +2,14 @@ use crate::config::{LogLevel, CONFIG};
 use crate::logging::{capture_stack_trace, LogEvent};
 use crate::log_event;
 use crate::ReentrancyGuard;
+use once_cell::sync::Lazy;
 use retour::static_detour;
 use serde_json::json;
 use std::ffi::c_void;
 use std::slice;
+use std::sync::Mutex;
 use std::thread;
+use std::time::{Duration, Instant};
 use widestring::U16CStr;
 
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND};
@@ -17,7 +20,12 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DeleteFileW, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
-use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    CheckRemoteDebuggerPresent, IsDebuggerPresent, WriteProcessMemory,
+};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LoadLibraryExW, LoadLibraryW,
@@ -27,12 +35,19 @@ use windows_sys::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, ExitProcess, OpenProcess, LPTHREAD_START_ROUTINE,
-    PROCESS_INFORMATION, STARTUPINFOW, THREAD_CREATION_FLAGS, TerminateProcess,
+    CreateProcessW, CreateRemoteThread, ExitProcess, OpenProcess,
+    LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, STARTUPINFOW, THREAD_CREATION_FLAGS,
+    TerminateProcess,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 
 type HINTERNET = isize;
+type NTSTATUS = i32;
+type PROCESSINFOCLASS = u32;
+
+static LAST_IS_DEBUGGER_PRESENT_LOG: Lazy<Mutex<Option<Instant>>> =
+    Lazy::new(|| Mutex::new(None));
+const IS_DEBUGGER_PRESENT_LOG_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Safely converts a null-terminated UTF-16 string pointer to a Rust String.
 /// Returns a placeholder if the pointer is null.
@@ -80,11 +95,9 @@ static_detour! {
     pub static CreateFileWHook: unsafe extern "system" fn(
         *const u16, u32, u32, *const SECURITY_ATTRIBUTES, u32, u32, HANDLE
     ) -> HANDLE;
-
     pub static WriteFileHook: unsafe extern "system" fn(
         HANDLE, *const u8, u32, *mut u32, *mut OVERLAPPED
     ) -> BOOL;
-
     pub static HttpSendRequestWHook: unsafe extern "system" fn(HINTERNET, *const u16, u32, *const c_void, u32) -> BOOL;
     pub static TerminateProcessHook: unsafe extern "system" fn(HANDLE, u32) -> BOOL;
     pub static NtTerminateProcessHook: unsafe extern "system" fn(HANDLE, u32) -> i32;
@@ -110,7 +123,136 @@ static_detour! {
     pub static GetAddrInfoWHook: unsafe extern "system" fn(
         *const u16, *const u16, *const ADDRINFOW, *mut *mut ADDRINFOW
     ) -> i32;
+    pub static IsDebuggerPresentHook: unsafe extern "system" fn() -> BOOL;
+    pub static CheckRemoteDebuggerPresentHook: unsafe extern "system" fn(HANDLE, *mut BOOL) -> BOOL;
+    pub static NtQueryInformationProcessHook: unsafe extern "system" fn(HANDLE, PROCESSINFOCLASS, *mut c_void, u32, *mut u32) -> NTSTATUS;
+    pub static CreateToolhelp32SnapshotHook: unsafe extern "system" fn(u32, u32) -> HANDLE;
+    pub static Process32FirstWHook: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL;
+    pub static Process32NextWHook: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL;
     pub static ExitProcessHook: unsafe extern "system" fn(u32) -> !;
+}
+
+pub fn hooked_is_debugger_present() -> BOOL {
+    let should_log = {
+        let mut last_log_time = LAST_IS_DEBUGGER_PRESENT_LOG.lock().unwrap();
+        if let Some(last_time) = *last_log_time {
+            if last_time.elapsed() < IS_DEBUGGER_PRESENT_LOG_COOLDOWN {
+                false
+            } else {
+                *last_log_time = Some(Instant::now());
+                true
+            }
+        } else {
+            *last_log_time = Some(Instant::now());
+            true
+        }
+    };
+
+    if should_log {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            log_event(LogLevel::Warn, LogEvent::AntiDebugCheck {
+                function_name: "IsDebuggerPresent".to_string(),
+                parameters: json!({
+                    "note": "Anti-debugging check detected. Returning FALSE.",
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            });
+        }
+    }
+
+    // Always return FALSE to hide the debugger.
+    0
+}
+
+pub unsafe fn hooked_check_remote_debugger_present(
+    h_process: HANDLE,
+    pb_is_debugger_present: *mut BOOL,
+) -> BOOL {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(LogLevel::Warn, LogEvent::AntiDebugCheck {
+            function_name: "CheckRemoteDebuggerPresent".to_string(),
+            parameters: json!({
+                "process_handle": h_process as usize,
+                "note": "Anti-debugging check detected. Returning FALSE.",
+            }),
+            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+        });
+    }
+
+    // Lie about the debugger's presence.
+    if !pb_is_debugger_present.is_null() {
+        *pb_is_debugger_present = 0; // FALSE
+    }
+
+    1 // TRUE (success)
+}
+
+pub unsafe fn hooked_nt_query_information_process(
+    process_handle: HANDLE,
+    process_information_class: PROCESSINFOCLASS,
+    process_information: *mut c_void,
+    process_information_length: u32,
+    return_length: *mut u32,
+) -> NTSTATUS {
+    const PROCESS_DEBUG_PORT: u32 = 7;
+    if process_information_class == PROCESS_DEBUG_PORT {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            log_event(LogLevel::Warn, LogEvent::AntiDebugCheck {
+                function_name: "NtQueryInformationProcess".to_string(),
+                parameters: json!({
+                    "process_handle": process_handle as usize,
+                    "class": "ProcessDebugPort",
+                    "note": "Anti-debugging check detected. Modifying return value.",
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            });
+        }
+        // Lie by indicating that there is no debug port.
+        if process_information_length as usize >= std::mem::size_of::<HANDLE>() {
+            *(process_information as *mut HANDLE) = 0; // NULL handle
+            if !return_length.is_null() {
+                *return_length = std::mem::size_of::<HANDLE>() as u32;
+            }
+            return 0; // STATUS_SUCCESS
+        }
+    }
+
+    NtQueryInformationProcessHook.call(
+        process_handle,
+        process_information_class,
+        process_information,
+        process_information_length,
+        return_length,
+    )
+}
+
+pub unsafe fn hooked_create_toolhelp32_snapshot(dw_flags: u32, th32_process_id: u32) -> HANDLE {
+    if dw_flags == TH32CS_SNAPPROCESS {
+        log_event(LogLevel::Info, LogEvent::ProcessEnumeration {
+            function_name: "CreateToolhelp32Snapshot".to_string(),
+            parameters: json!({ "flags": "TH32CS_SNAPPROCESS" }),
+        });
+    }
+    CreateToolhelp32SnapshotHook.call(dw_flags, th32_process_id)
+}
+
+pub unsafe fn hooked_process32_first_w(
+    h_snapshot: HANDLE,
+    lppe: *mut PROCESSENTRY32W,
+) -> BOOL {
+    log_event(LogLevel::Info, LogEvent::ProcessEnumeration {
+        function_name: "Process32FirstW".to_string(),
+        parameters: json!({}),
+    });
+    Process32FirstWHook.call(h_snapshot, lppe)
+}
+
+pub unsafe fn hooked_process32_next_w(h_snapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL {
+    log_event(LogLevel::Info, LogEvent::ProcessEnumeration {
+        function_name: "Process32NextW".to_string(),
+        parameters: json!({}),
+    });
+    Process32NextWHook.call(h_snapshot, lppe)
 }
 
 /// Hook for `CreateFileW`. Logs the file path and desired access rights.
@@ -576,6 +718,35 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
         hooked_terminate_process
     );
 
+    // Anti-debugging hooks
+    hook!(
+        IsDebuggerPresentHook,
+        IsDebuggerPresent,
+        hooked_is_debugger_present
+    );
+    hook!(
+        CheckRemoteDebuggerPresentHook,
+        CheckRemoteDebuggerPresent,
+        |a, b| hooked_check_remote_debugger_present(a, b)
+    );
+
+    // Process enumeration hooks
+    hook!(
+        CreateToolhelp32SnapshotHook,
+        CreateToolhelp32Snapshot,
+        |a, b| hooked_create_toolhelp32_snapshot(a, b)
+    );
+    hook!(
+        Process32FirstWHook,
+        Process32FirstW,
+        |a, b| hooked_process32_first_w(a, b)
+    );
+    hook!(
+        Process32NextWHook,
+        Process32NextW,
+        |a, b| hooked_process32_next_w(a, b)
+    );
+
     hook!(CreateFileWHook, CreateFileW, |a, b, c, d, e, f, g| {
         hooked_create_file_w(a, b, c, d, e, f, g)
     });
@@ -674,6 +845,13 @@ unsafe fn initialize_dynamic_hooks() -> Result<(), String> {
                 NtTerminateProcessHook,
                 std::mem::transmute(addr),
                 hooked_nt_terminate_process
+            );
+        }
+        if let Some(addr) = GetProcAddress(ntdll, b"NtQueryInformationProcess\0".as_ptr()) {
+            hook!(
+                NtQueryInformationProcessHook,
+                std::mem::transmute(addr),
+                |a, b, c, d, e| hooked_nt_query_information_process(a, b, c, d, e)
             );
         }
     }

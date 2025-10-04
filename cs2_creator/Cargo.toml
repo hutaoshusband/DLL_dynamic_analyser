@@ -18,4 +18,3 @@ widestring = { workspace = true }
 
 [[bin]]
 name = "cs2_creator"
-test = false

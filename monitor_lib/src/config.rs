@@ -1,6 +1,7 @@
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
@@ -28,11 +29,12 @@ impl FromStr for LogLevel {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Config {
     pub log_level: LogLevel,
     pub stack_trace_on_error_only: bool,
     pub stack_trace_frame_limit: usize,
+    pub termination_allowed: AtomicBool,
 }
 
 impl Config {
@@ -56,6 +58,7 @@ impl Config {
             log_level,
             stack_trace_on_error_only,
             stack_trace_frame_limit,
+            termination_allowed: AtomicBool::new(false),
         }
     }
 }

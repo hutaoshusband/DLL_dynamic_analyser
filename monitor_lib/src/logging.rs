@@ -45,10 +45,10 @@ impl LogEntry {
     pub fn new(level: LogLevel, mut event: LogEvent) -> Self {
         // Check if the event itself comes with a stack trace.
         // We take it from the event, so it's not duplicated in the final JSON.
-        let event_stack_trace = if let LogEvent::ApiHook { stack_trace, .. } = &mut event {
-            stack_trace.take()
-        } else {
-            None
+        let event_stack_trace = match &mut event {
+            LogEvent::ApiHook { stack_trace, .. } => stack_trace.take(),
+            LogEvent::AntiDebugCheck { stack_trace, .. } => stack_trace.take(),
+            _ => None,
         };
 
         let final_stack_trace = if event_stack_trace.is_some() {
@@ -95,6 +95,16 @@ pub enum LogEvent {
         parameters: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         stack_trace: Option<Vec<String>>,
+    },
+    AntiDebugCheck {
+        function_name: String,
+        parameters: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stack_trace: Option<Vec<String>>,
+    },
+    ProcessEnumeration {
+        function_name: String,
+        parameters: serde_json::Value,
     },
     MemoryScan {
         status: String,

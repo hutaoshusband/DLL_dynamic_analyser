@@ -173,6 +173,12 @@ fn dll_main_internal() -> Result<(), String> {
         },
     );
 
+    // Send the address of the termination flag to the injector GUI.
+    let addr = &CONFIG.termination_allowed as *const _ as usize;
+    log_event(LogLevel::Debug, LogEvent::Initialization {
+        status: format!("TERMINATION_FLAG_ADDR:{}", addr),
+    });
+
     unsafe {
         initialize_all_hooks()?;
     }

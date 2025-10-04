@@ -63,16 +63,36 @@ pub enum LogLevel {
 #[derive(Deserialize, Debug)]
 #[serde(tag = "event_type", content = "details")]
 pub enum LogEvent {
-    Initialization { status: String },
-    Shutdown { status: String },
+    Initialization {
+        status: String,
+    },
+    Shutdown {
+        status: String,
+    },
     ApiHook {
         function_name: String,
         parameters: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         stack_trace: Option<Vec<String>>,
     },
-    MemoryScan { status: String, result: String },
-    Error { source: String, message: String },
+    AntiDebugCheck {
+        function_name: String,
+        parameters: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stack_trace: Option<Vec<String>>,
+    },
+    ProcessEnumeration {
+        function_name: String,
+        parameters: serde_json::Value,
+    },
+    MemoryScan {
+        status: String,
+        result: String,
+    },
+    Error {
+        source: String,
+        message: String,
+    },
 }
 
 // Implement PartialEq manually for LogEvent because serde_json::Value doesn't derive it.
@@ -96,6 +116,28 @@ impl PartialEq for LogEvent {
                     ..
                 },
             ) => f1 == f2 && p1.to_string() == p2.to_string(), // Compare parameters as strings
+            (
+                LogEvent::AntiDebugCheck {
+                    function_name: f1,
+                    parameters: p1,
+                    ..
+                },
+                LogEvent::AntiDebugCheck {
+                    function_name: f2,
+                    parameters: p2,
+                    ..
+                },
+            ) => f1 == f2 && p1.to_string() == p2.to_string(),
+            (
+                LogEvent::ProcessEnumeration {
+                    function_name: f1,
+                    parameters: p1,
+                },
+                LogEvent::ProcessEnumeration {
+                    function_name: f2,
+                    parameters: p2,
+                },
+            ) => f1 == f2 && p1.to_string() == p2.to_string(),
             (
                 LogEvent::MemoryScan {
                     status: s1,
@@ -614,6 +656,15 @@ fn format_log_entry(log: &LogEntry) -> String {
             parameters,
             ..
         } => format!("API Hook: {} | Params: {}", function_name, parameters),
+        LogEvent::AntiDebugCheck {
+            function_name,
+            parameters,
+            ..
+        } => format!("Anti-Debug: {} | Params: {}", function_name, parameters),
+        LogEvent::ProcessEnumeration {
+            function_name,
+            parameters,
+        } => format!("Process Enum: {} | Params: {}", function_name, parameters),
         LogEvent::MemoryScan { status, result } => format!("Scan: {} -> {}", status, result),
         LogEvent::Error { source, message } => format!("ERROR [{}]: {}", source, message),
     };
