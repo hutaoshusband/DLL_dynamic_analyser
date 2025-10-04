@@ -123,9 +123,8 @@ pub enum LogEvent {
         source: String,
         message: String,
     },
-    YaraMatch {
+    VmpSectionFound {
         module_path: String,
-        rule_name: String,
-        scan_details: serde_json::Value,
+        section_name: String,
     },
 }

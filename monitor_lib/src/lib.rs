@@ -9,7 +9,6 @@ mod iat_monitor;
 mod logging;
 mod scanner;
 mod vmp_dumper;
-mod yara_scanner;
 
 use crate::config::{LogLevel, CONFIG};
 use crate::hooks::cpprest_hook;
@@ -233,8 +232,8 @@ fn dll_main_internal() -> Result<(), String> {
 
     // Spawn the memory scanner thread.
     let scanner_handle = thread::spawn(|| {
-        let mut last_yara_scan = Instant::now();
-        let yara_scan_cooldown = Duration::from_secs(60); // Scan every minute
+        let mut last_vmp_scan = Instant::now();
+        let vmp_scan_cooldown = Duration::from_secs(60); // Scan every minute
 
         while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
             unsafe {
@@ -244,20 +243,22 @@ fn dll_main_internal() -> Result<(), String> {
                 hardware_bp::check_debug_registers();
                 iat_monitor::scan_iat_modifications();
 
-                // Perform the more intensive Yara scan on a cooldown.
-                if last_yara_scan.elapsed() >= yara_scan_cooldown {
+                // Perform the VMP section scan on a cooldown.
+                if last_vmp_scan.elapsed() >= vmp_scan_cooldown {
                     log_event(
                         LogLevel::Info,
                         LogEvent::MemoryScan {
-                            status: "Starting Yara scan on all loaded modules.".to_string(),
+                            status: "Starting VMP section scan on all loaded modules."
+                                .to_string(),
                             result: "".to_string(),
                         },
                     );
                     let modules = scanner::enumerate_modules();
                     for (path, mem_slice) in modules {
-                        yara_scanner::scan_memory(&path, mem_slice);
+                        // The new function needs the base address, not the whole slice.
+                        scanner::scan_for_vmp_sections(&path, mem_slice.as_ptr() as usize);
                     }
-                    last_yara_scan = Instant::now();
+                    last_vmp_scan = Instant::now();
                 }
             }
             // Sleep for a bit to avoid excessive CPU usage.

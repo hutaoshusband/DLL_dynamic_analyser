@@ -223,3 +223,48 @@ pub unsafe fn scan_tls_callbacks(module_base: usize) {
         callback_addr = callback_addr.add(1);
     }
 }
+
+/// Scans a module's PE headers for section names characteristic of VMProtect.
+///
+/// # Arguments
+///
+/// * `module_path` - The path of the module being scanned, for logging.
+/// * `module_base` - The base address of the module in memory.
+///
+pub unsafe fn scan_for_vmp_sections(module_path: &str, module_base: usize) {
+    let dos_header = &*(module_base as *const IMAGE_DOS_HEADER);
+    if dos_header.e_magic != 0x5A4D {
+        return;
+    }
+
+    let nt_headers_ptr = module_base + dos_header.e_lfanew as usize;
+    let nt_headers = &*(nt_headers_ptr as *const IMAGE_NT_HEADERS64);
+    if nt_headers.Signature != 0x4550 {
+        return;
+    }
+
+    // The section headers follow immediately after the optional header.
+    let section_header_ptr = (nt_headers_ptr as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>())
+        as *const windows_sys::Win32::System::Diagnostics::Debug::IMAGE_SECTION_HEADER;
+    let num_sections = nt_headers.FileHeader.NumberOfSections;
+
+    for i in 0..num_sections {
+        let section = &*section_header_ptr.add(i as usize);
+        // Section names are 8-byte, null-padded, UTF-8 strings.
+        let name_slice = &section.Name[..];
+        let name_len = name_slice.iter().position(|&c| c == 0).unwrap_or(8);
+        if let Ok(name) = std::str::from_utf8(&name_slice[..name_len]) {
+            if name.starts_with(".vmp") {
+                log_event(
+                    LogLevel::Warn,
+                    LogEvent::VmpSectionFound {
+                        module_path: module_path.to_string(),
+                        section_name: name.to_string(),
+                    },
+                );
+                // We can break after the first detection, as one is enough to flag it.
+                break;
+            }
+        }
+    }
+}
