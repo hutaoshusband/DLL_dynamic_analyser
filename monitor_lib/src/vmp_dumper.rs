@@ -8,23 +8,25 @@ use once_cell::sync::Lazy;
 use serde_json::json;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::os::windows::ffi::OsStringExt;
 use std::fs::{self, File};
 use std::io::Write;
+use std::mem;
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::slice;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::MAX_PATH;
-use std::mem;
-use windows_sys::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, ReadProcessMemory};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, MAX_PATH};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    ReadProcessMemory, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
+};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
     TH32CS_SNAPMODULE32,
 };
-use windows_sys::Win32::System::Diagnostics::Debug::IMAGE_SECTION_HEADER;
-use windows_sys::Win32::System::SystemServices::{IMAGE_DOS_HEADER};
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
 
 // Data structures for tracking memory and VMP targets
@@ -104,10 +106,13 @@ pub fn track_memory_allocation(
 
 pub fn start_vmp_monitoring() {
     thread::spawn(|| {
-        log_event(LogLevel::Info, LogEvent::VmpTrace {
-            message: "VMP monitoring thread started.".to_string(),
-            details: json!(null),
-        });
+        log_event(
+            LogLevel::Info,
+            LogEvent::VmpTrace {
+                message: "VMP monitoring thread started.".to_string(),
+                details: json!(null),
+            },
+        );
 
         loop {
             thread::sleep(Duration::from_secs(30));
@@ -120,71 +125,56 @@ pub fn start_vmp_monitoring() {
 pub fn handle_command(command: &str) {
     match command {
         "scan_vmp" => {
-            log_event(LogLevel::Info, LogEvent::VmpTrace {
-                message: "Manual VMP scan triggered.".to_string(),
-                details: json!(null),
-            });
+            log_event(
+                LogLevel::Info,
+                LogEvent::VmpTrace {
+                    message: "Manual VMP scan triggered.".to_string(),
+                    details: json!(null),
+                },
+            );
             scan_for_vmp_modules();
-        },
+        }
         "dump_all" => {
-            log_event(LogLevel::Info, LogEvent::VmpTrace {
-                message: "Manual VMP dump triggered.".to_string(),
-                details: json!(null),
-            });
+            log_event(
+                LogLevel::Info,
+                LogEvent::VmpTrace {
+                    message: "Manual VMP dump triggered.".to_string(),
+                    details: json!(null),
+                },
+            );
             dump_all_targets(DumpReason::Manual);
-        },
+        }
         _ => {}
     }
 }
 
-
 // Internal implementation
 fn scan_for_vmp_modules() {
-    let process_handle = unsafe { GetCurrentProcess() };
-    let snapshot_handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, 0) };
-
-    if snapshot_handle as isize == -1 {
-        return;
-    }
-
-    let mut module_entry: MODULEENTRY32W = unsafe { mem::zeroed() };
-    module_entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
-
-    if unsafe { Module32FirstW(snapshot_handle, &mut module_entry) } == 0 {
-        return;
-    }
-
-    let mut modules = Vec::new();
-    loop {
-        modules.push(module_entry.clone());
-        if unsafe { Module32NextW(snapshot_handle, &mut module_entry) } == 0 {
-            break;
-        }
-    }
-
+    let modules = unsafe { crate::scanner::enumerate_modules() };
     let mut state = match VMP_STATE.lock() {
         Ok(s) => s,
         Err(_) => return,
     };
 
-    for module in modules {
-        let base_addr = module.modBaseAddr as usize;
+    for (path, memory) in modules {
+        let base_addr = memory.as_ptr() as usize;
         if state.targets.contains_key(&base_addr) {
             continue; // Already tracking this module
         }
-        
-        let module_name = String::from_utf16_lossy(&module.szModule).trim_end_matches('\0').to_string();
 
-        if is_vmp_protected(base_addr, module.modBaseSize as usize) {
-            log_event(LogLevel::Warn, LogEvent::VmpTrace {
-                message: format!("Detected VMP-protected module: {}", module_name),
-                details: json!({ "base_address": base_addr }),
-            });
+        if is_vmp_protected(base_addr) {
+            log_event(
+                LogLevel::Warn,
+                LogEvent::VmpTrace {
+                    message: format!("Detected VMP-protected module: {}", path),
+                    details: json!({ "base_address": base_addr }),
+                },
+            );
 
             let target = VmpTarget {
                 base_address: base_addr,
-                size: module.modBaseSize as usize,
-                module_name: module_name.clone(),
+                size: memory.len(),
+                module_name: path.clone(),
                 dump_priority: 100,
                 has_been_dumped: false,
             };
@@ -215,58 +205,55 @@ unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, ()> {
 }
 
 /// Checks if a module is protected by VMProtect by scanning its PE section headers.
-fn is_vmp_protected(base_address: usize, _size: usize) -> bool {
+fn is_vmp_protected(base_address: usize) -> bool {
     unsafe {
-        // 1. Read the DOS header to find the NT headers.
         let Ok(dos_header) = read_memory::<IMAGE_DOS_HEADER>(base_address) else {
             return false;
         };
-
-        if dos_header.e_magic != 0x5A4D { // "MZ"
+        if dos_header.e_magic != 0x5A4D {
             return false;
         }
 
-        // 2. Read the NT headers.
         let nt_headers_addr = base_address + dos_header.e_lfanew as usize;
         let Ok(nt_headers) = read_memory::<IMAGE_NT_HEADERS64>(nt_headers_addr) else {
             return false;
         };
-
-        if nt_headers.Signature != 0x00004550 { // "PE\0\0"
+        if nt_headers.Signature != 0x00004550 {
             return false;
         }
 
-        // 3. Locate the first section header.
-        let section_header_addr = nt_headers_addr + mem::size_of::<IMAGE_NT_HEADERS64>();
+        let section_header_addr =
+            nt_headers_addr + mem::size_of::<IMAGE_NT_HEADERS64>();
         let number_of_sections = nt_headers.FileHeader.NumberOfSections;
 
-        // 4. Iterate through all sections and check their names.
         for i in 0..number_of_sections {
             let current_section_header_addr =
                 section_header_addr + (i as usize * mem::size_of::<IMAGE_SECTION_HEADER>());
-            
-            let Ok(section_header) = read_memory::<IMAGE_SECTION_HEADER>(current_section_header_addr) else {
-                continue; // Skip if a section header is unreadable.
+            let Ok(section_header) =
+                read_memory::<IMAGE_SECTION_HEADER>(current_section_header_addr)
+            else {
+                continue;
             };
 
-            // VMP uses section names like .vmp0, .vmp1, etc.
             let section_name = String::from_utf8_lossy(&section_header.Name);
             if section_name.trim_matches('\0').starts_with(".vmp") {
-                log_event(LogLevel::Debug, LogEvent::VmpTrace {
-                    message: format!("Found VMP section: {}", section_name.trim_matches('\0')),
-                    details: json!({ "module_base": base_address }),
-                });
+                log_event(
+                    LogLevel::Debug,
+                    LogEvent::VmpTrace {
+                        message: format!("Found VMP section: {}", section_name.trim_matches('\0')),
+                        details: json!({ "module_base": base_address }),
+                    },
+                );
                 return true;
             }
         }
     }
-
     false
 }
 
 fn analyze_and_dump_if_ready() {
-    // More complex logic would go here to decide *when* to dump.
-    // For now, we don't do anything automatically after the initial scan.
+    // This logic can be expanded to automatically dump based on certain criteria,
+    // e.g., after observing specific API calls that suggest unpacking is complete.
 }
 
 fn dump_all_targets(reason: DumpReason) {
@@ -276,16 +263,19 @@ fn dump_all_targets(reason: DumpReason) {
     };
 
     if targets_to_dump.is_empty() {
-        log_event(LogLevel::Info, LogEvent::VmpTrace {
-            message: "No VMP targets found to dump.".to_string(),
-            details: json!(null),
-        });
+        log_event(
+            LogLevel::Info,
+            LogEvent::VmpTrace {
+                message: "No VMP targets found to dump.".to_string(),
+                details: json!(null),
+            },
+        );
         return;
     }
 
     for target in targets_to_dump {
         if !target.has_been_dumped {
-            dump_pe(target.base_address, target.size, &target.module_name, &reason);
+            reconstruct_and_dump_pe(&target, &reason);
             if let Ok(mut state) = VMP_STATE.lock() {
                 if let Some(t) = state.targets.get_mut(&target.base_address) {
                     t.has_been_dumped = true;
@@ -312,69 +302,141 @@ fn get_dump_path() -> Option<PathBuf> {
     None
 }
 
-fn dump_pe(base_address: usize, size: usize, name: &str, reason: &DumpReason) {
-    let dump_path = match get_dump_path() {
-        Some(p) => p,
-        None => {
+/// Reconstructs a PE file from memory and dumps it to disk.
+/// This is superior to a raw memory dump as it rebuilds the file according
+/// to its PE headers, resulting in a cleaner, more analyzable file.
+fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
+    let base_address = target.base_address;
+    let process_handle = unsafe { GetCurrentProcess() };
+
+    unsafe {
+        // 1. Read headers from memory
+        let Ok(dos_header) = read_memory::<IMAGE_DOS_HEADER>(base_address) else {
             log_event(LogLevel::Error, LogEvent::VmpTrace {
-                message: "Failed to get dump path.".to_string(),
-                details: json!(null),
+                message: "Failed to read DOS header for dumping.".to_string(),
+                details: json!({ "base_address": base_address }),
+            });
+            return;
+        };
+
+        let nt_headers_addr = base_address + dos_header.e_lfanew as usize;
+        let Ok(nt_headers) = read_memory::<IMAGE_NT_HEADERS64>(nt_headers_addr) else {
+            log_event(LogLevel::Error, LogEvent::VmpTrace {
+                message: "Failed to read NT headers for dumping.".to_string(),
+                details: json!({ "nt_header_address": nt_headers_addr }),
+            });
+            return;
+        };
+
+        // 2. Allocate a buffer for the reconstructed PE file.
+        // SizeOfImage is the size of the PE file in memory, which is what we want to reconstruct.
+        let file_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let mut file_buffer = vec![0u8; file_size];
+
+        // 3. Copy the PE headers into the buffer.
+        let header_size = (dos_header.e_lfanew as usize) + mem::size_of::<IMAGE_NT_HEADERS64>();
+        let mut headers_buffer = vec![0u8; header_size];
+        if ReadProcessMemory(
+            process_handle,
+            base_address as *const c_void,
+            headers_buffer.as_mut_ptr() as *mut c_void,
+            header_size,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            log_event(LogLevel::Error, LogEvent::VmpTrace {
+                message: "Failed to read PE headers into buffer.".to_string(),
+                details: json!({ "base_address": base_address, "header_size": header_size }),
             });
             return;
         }
-    };
+        file_buffer[..header_size].copy_from_slice(&headers_buffer);
 
-    let reason_str = match reason {
-        DumpReason::Manual => "manual",
-        DumpReason::UnpackedPe => "unpacked",
-        DumpReason::VmpSection => "vmp_section",
-    };
-    let filename = format!("{}_{}_{:#X}.bin", name, reason_str, base_address);
-    let full_path = dump_path.join(filename);
+        // 4. Iterate through sections, copy them from memory into the buffer at the correct file offset.
+        let number_of_sections = nt_headers.FileHeader.NumberOfSections;
+        let section_header_addr = nt_headers_addr + mem::size_of::<IMAGE_NT_HEADERS64>();
 
-    let mut buffer = vec![0u8; size];
-    let process_handle = unsafe { GetCurrentProcess() };
+        for i in 0..number_of_sections {
+            let current_section_header_addr =
+                section_header_addr + (i as usize * mem::size_of::<IMAGE_SECTION_HEADER>());
+            let Ok(section_header) =
+                read_memory::<IMAGE_SECTION_HEADER>(current_section_header_addr)
+            else {
+                continue;
+            };
 
-    let res = unsafe {
-        ReadProcessMemory(
-            process_handle,
-            base_address as *const c_void,
-            buffer.as_mut_ptr() as *mut c_void,
-            size,
-            std::ptr::null_mut(),
-        )
-    };
+            let section_data_addr = base_address + section_header.VirtualAddress as usize;
+            let section_file_offset = section_header.PointerToRawData as usize;
+            let section_size = section_header.SizeOfRawData as usize;
 
-    if res == 0 {
-        log_event(LogLevel::Error, LogEvent::VmpTrace {
-            message: format!("Failed to read process memory for dumping {}", name),
-            details: json!({ "address": base_address, "size": size }),
-        });
-        return;
-    }
-
-    match File::create(&full_path) {
-        Ok(mut f) => {
-            if f.write_all(&buffer).is_ok() {
-                log_event(LogLevel::Success, LogEvent::FileOperation {
-                    path: full_path.to_string_lossy().to_string(),
-                    operation: "VMP Dump".to_string(),
-                    details: format!("Successfully dumped {} bytes from {}", size, name),
+            if section_file_offset + section_size > file_buffer.len() {
+                log_event(LogLevel::Warn, LogEvent::VmpTrace {
+                    message: "Section data extends beyond file buffer. Truncating.".to_string(),
+                    details: json!({ "section": i, "offset": section_file_offset, "size": section_size }),
                 });
-            } else {
-                 log_event(LogLevel::Error, LogEvent::FileOperation {
+                continue;
+            }
+
+            let mut section_buffer = vec![0u8; section_size];
+            if ReadProcessMemory(
+                process_handle,
+                section_data_addr as *const c_void,
+                section_buffer.as_mut_ptr() as *mut c_void,
+                section_size,
+                std::ptr::null_mut(),
+            ) != 0
+            {
+                file_buffer[section_file_offset..section_file_offset + section_size]
+                    .copy_from_slice(&section_buffer);
+            }
+        }
+
+        // 5. Write the reconstructed buffer to disk.
+        let dump_path = match get_dump_path() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let reason_str = match reason {
+            DumpReason::Manual => "manual",
+            DumpReason::UnpackedPe => "unpacked",
+            DumpReason::VmpSection => "vmp_section",
+        };
+        let module_file_name = PathBuf::from(&target.module_name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown_module")
+            .to_string();
+
+        let filename = format!("{}_{}_{:#X}.dmp", module_file_name, reason_str, base_address);
+        let full_path = dump_path.join(filename);
+
+        match File::create(&full_path) {
+            Ok(mut f) => {
+                if f.write_all(&file_buffer).is_ok() {
+                    log_event(LogLevel::Success, LogEvent::FileOperation {
+                        path: full_path.to_string_lossy().to_string(),
+                        operation: "PE Reconstruction".to_string(),
+                        details: format!(
+                            "Successfully dumped {} bytes from {}",
+                            file_size, target.module_name
+                        ),
+                    });
+                } else {
+                    log_event(LogLevel::Error, LogEvent::FileOperation {
+                        path: full_path.to_string_lossy().to_string(),
+                        operation: "PE Reconst. Write".to_string(),
+                        details: "Failed to write dumped memory to file".to_string(),
+                    });
+                }
+            }
+            Err(e) => {
+                log_event(LogLevel::Error, LogEvent::FileOperation {
                     path: full_path.to_string_lossy().to_string(),
-                    operation: "VMP Dump Write".to_string(),
-                    details: "Failed to write dumped memory to file".to_string(),
+                    operation: "PE Reconst. Create".to_string(),
+                    details: e.to_string(),
                 });
             }
-        },
-        Err(e) => {
-            log_event(LogLevel::Error, LogEvent::FileOperation {
-                path: full_path.to_string_lossy().to_string(),
-                operation: "VMP Dump Create".to_string(),
-                details: e.to_string(),
-            });
         }
     }
 }

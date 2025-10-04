@@ -2,20 +2,79 @@ use crate::config::LogLevel;
 use crate::logging::LogEvent;
 use crate::{log_event, ReentrancyGuard};
 use patternscan::scan;
+use std::ffi::OsString;
 use std::io::Cursor;
+use std::os::windows::ffi::OsStringExt;
 use std::slice;
-use windows_sys::Win32::System::Diagnostics::Debug::{
-    IMAGE_NT_HEADERS64, ReadProcessMemory,
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, IMAGE_NT_HEADERS64};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+    TH32CS_SNAPMODULE32,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{
     VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_EXECUTE_READ,
     PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
 };
-use windows_sys::Win32::System::SystemServices::{
-    IMAGE_DOS_HEADER, IMAGE_TLS_DIRECTORY64,
-};
+use windows_sys::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_TLS_DIRECTORY64};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+
+/// Converts a fixed-size null-padded UTF-16 array to a Rust String.
+fn u16_array_to_string(arr: &[u16]) -> String {
+    let len = arr.iter().position(|&c| c == 0).unwrap_or(arr.len());
+    OsString::from_wide(&arr[..len])
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Enumerates all loaded modules in the current process.
+/// For each module, it returns its full path and a slice of its memory.
+/// This is unsafe because it creates a slice from a raw pointer with a lifetime of 'static.
+/// The caller must ensure this slice is only used while the module is loaded in memory.
+pub unsafe fn enumerate_modules() -> Vec<(String, &'static [u8])> {
+    let mut modules = Vec::new();
+    let process_id = GetCurrentProcessId();
+    // TH32CS_SNAPMODULE32 is needed even for 64-bit processes to get all modules.
+    let snapshot_handle =
+        CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id);
+
+    if snapshot_handle == INVALID_HANDLE_VALUE {
+        log_event(
+            LogLevel::Error,
+            LogEvent::Error {
+                source: "ModuleEnumeration".to_string(),
+                message: format!(
+                    "CreateToolhelp32Snapshot failed. Last error: {}",
+                    std::io::Error::last_os_error()
+                ),
+            },
+        );
+        return modules;
+    }
+
+    let mut module_entry: MODULEENTRY32W = std::mem::zeroed();
+    module_entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+
+    if Module32FirstW(snapshot_handle, &mut module_entry) != 0 {
+        loop {
+            let mod_path = u16_array_to_string(&module_entry.szExePath);
+
+            let module_slice =
+                slice::from_raw_parts(module_entry.modBaseAddr, module_entry.modBaseSize as usize);
+
+            modules.push((mod_path, module_slice));
+
+            if Module32NextW(snapshot_handle, &mut module_entry) == 0 {
+                break;
+            }
+        }
+    }
+
+    CloseHandle(snapshot_handle);
+    modules
+}
 
 /// Gets a slice representing the memory of the main executable module.
 /// This is unsafe because it involves reading directly from memory based on PE header information.
@@ -107,10 +166,16 @@ pub fn scan_for_manual_mapping() {
                         ) != 0
                             && nt_headers.Signature == 0x4550
                         {
-                            log_event(LogLevel::Warn, LogEvent::MemoryScan {
-                                status: "Potential manually mapped image found!".to_string(),
-                                result: format!("Address: {:#X}", mem_info.BaseAddress as usize),
-                            });
+                            log_event(
+                                LogLevel::Warn,
+                                LogEvent::MemoryScan {
+                                    status: "Potential manually mapped image found!".to_string(),
+                                    result: format!(
+                                        "Address: {:#X}",
+                                        mem_info.BaseAddress as usize
+                                    ),
+                                },
+                            );
                         }
                     }
                 }
@@ -135,7 +200,8 @@ pub unsafe fn scan_tls_callbacks(module_base: usize) {
         return;
     }
 
-    let tls_dir = (module_base + tls_dir_entry.VirtualAddress as usize) as *const IMAGE_TLS_DIRECTORY64;
+    let tls_dir =
+        (module_base + tls_dir_entry.VirtualAddress as usize) as *const IMAGE_TLS_DIRECTORY64;
     let mut callback_addr = (*tls_dir).AddressOfCallBacks as *const usize;
 
     // Callbacks are stored in a null-terminated array of pointers.
@@ -144,10 +210,16 @@ pub unsafe fn scan_tls_callbacks(module_base: usize) {
     }
 
     while *callback_addr != 0 {
-        log_event(LogLevel::Warn, LogEvent::MemoryScan {
-            status: "TLS Callback Found".to_string(),
-            result: format!("Module: {:#X}, Callback Address: {:#X}", module_base, *callback_addr),
-        });
+        log_event(
+            LogLevel::Warn,
+            LogEvent::MemoryScan {
+                status: "TLS Callback Found".to_string(),
+                result: format!(
+                    "Module: {:#X}, Callback Address: {:#X}",
+                    module_base, *callback_addr
+                ),
+            },
+        );
         callback_addr = callback_addr.add(1);
     }
 }

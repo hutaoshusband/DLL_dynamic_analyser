@@ -55,7 +55,10 @@ type HCRYPTHASH = usize;
 
 static LAST_IS_DEBUGGER_PRESENT_LOG: Lazy<Mutex<Option<Instant>>> =
     Lazy::new(|| Mutex::new(None));
-const IS_DEBUGGER_PRESENT_LOG_COOLDOWN: Duration = Duration::from_secs(5);
+static LAST_PROCESS_ENUM_LOG: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+static LAST_WRITE_FILE_LOG: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+
+const GENERIC_LOG_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Safely converts a null-terminated UTF-16 string pointer to a Rust String.
 /// Returns a placeholder if the pointer is null.
@@ -158,7 +161,7 @@ pub fn hooked_is_debugger_present() -> BOOL {
     let should_log = {
         let mut last_log_time = LAST_IS_DEBUGGER_PRESENT_LOG.lock().unwrap();
         if let Some(last_time) = *last_log_time {
-            if last_time.elapsed() < IS_DEBUGGER_PRESENT_LOG_COOLDOWN {
+            if last_time.elapsed() < GENERIC_LOG_COOLDOWN {
                 false
             } else {
                 *last_log_time = Some(Instant::now());
@@ -172,13 +175,16 @@ pub fn hooked_is_debugger_present() -> BOOL {
 
     if should_log {
         if let Some(_guard) = ReentrancyGuard::new() {
-            log_event(LogLevel::Warn, LogEvent::AntiDebugCheck {
-                function_name: "IsDebuggerPresent".to_string(),
-                parameters: json!({
-                    "note": "Anti-debugging check detected. Returning FALSE.",
-                }),
-                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-            });
+            log_event(
+                LogLevel::Warn,
+                LogEvent::AntiDebugCheck {
+                    function_name: "IsDebuggerPresent".to_string(),
+                    parameters: json!({
+                        "note": "Anti-debugging check detected. Returning FALSE.",
+                    }),
+                    stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+                },
+            );
         }
     }
 
@@ -191,14 +197,17 @@ pub unsafe fn hooked_check_remote_debugger_present(
     pb_is_debugger_present: *mut BOOL,
 ) -> BOOL {
     if let Some(_guard) = ReentrancyGuard::new() {
-        log_event(LogLevel::Warn, LogEvent::AntiDebugCheck {
-            function_name: "CheckRemoteDebuggerPresent".to_string(),
-            parameters: json!({
-                "process_handle": h_process as usize,
-                "note": "Anti-debugging check detected. Returning FALSE.",
-            }),
-            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-        });
+        log_event(
+            LogLevel::Warn,
+            LogEvent::AntiDebugCheck {
+                function_name: "CheckRemoteDebuggerPresent".to_string(),
+                parameters: json!({
+                    "process_handle": h_process as usize,
+                    "note": "Anti-debugging check detected. Returning FALSE.",
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
     }
 
     // Lie about the debugger's presence.
@@ -219,15 +228,18 @@ pub unsafe fn hooked_nt_query_information_process(
     const PROCESS_DEBUG_PORT: u32 = 7;
     if process_information_class == PROCESS_DEBUG_PORT {
         if let Some(_guard) = ReentrancyGuard::new() {
-            log_event(LogLevel::Warn, LogEvent::AntiDebugCheck {
-                function_name: "NtQueryInformationProcess".to_string(),
-                parameters: json!({
-                    "process_handle": process_handle as usize,
-                    "class": "ProcessDebugPort",
-                    "note": "Anti-debugging check detected. Modifying return value.",
-                }),
-                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-            });
+            log_event(
+                LogLevel::Warn,
+                LogEvent::AntiDebugCheck {
+                    function_name: "NtQueryInformationProcess".to_string(),
+                    parameters: json!({
+                        "process_handle": process_handle as usize,
+                        "class": "ProcessDebugPort",
+                        "note": "Anti-debugging check detected. Modifying return value.",
+                    }),
+                    stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+                },
+            );
         }
         // Lie by indicating that there is no debug port.
         if process_information_length as usize >= std::mem::size_of::<HANDLE>() {
@@ -250,30 +262,49 @@ pub unsafe fn hooked_nt_query_information_process(
 
 pub unsafe fn hooked_create_toolhelp32_snapshot(dw_flags: u32, th32_process_id: u32) -> HANDLE {
     if dw_flags == TH32CS_SNAPPROCESS {
-        log_event(LogLevel::Info, LogEvent::ProcessEnumeration {
-            function_name: "CreateToolhelp32Snapshot".to_string(),
-            parameters: json!({ "flags": "TH32CS_SNAPPROCESS" }),
-        });
+        log_event(
+            LogLevel::Info,
+            LogEvent::ProcessEnumeration {
+                function_name: "CreateToolhelp32Snapshot".to_string(),
+                parameters: json!({ "flags": "TH32CS_SNAPPROCESS" }),
+            },
+        );
     }
     CreateToolhelp32SnapshotHook.call(dw_flags, th32_process_id)
 }
 
-pub unsafe fn hooked_process32_first_w(
-    h_snapshot: HANDLE,
-    lppe: *mut PROCESSENTRY32W,
-) -> BOOL {
-    log_event(LogLevel::Info, LogEvent::ProcessEnumeration {
-        function_name: "Process32FirstW".to_string(),
-        parameters: json!({}),
-    });
+pub unsafe fn hooked_process32_first_w(h_snapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL {
+    let should_log = {
+        let mut last_log_time = LAST_PROCESS_ENUM_LOG.lock().unwrap();
+        if let Some(last_time) = *last_log_time {
+            if last_time.elapsed() < GENERIC_LOG_COOLDOWN {
+                false
+            } else {
+                *last_log_time = Some(Instant::now());
+                true
+            }
+        } else {
+            *last_log_time = Some(Instant::now());
+            true
+        }
+    };
+
+    if should_log {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ProcessEnumeration {
+                function_name: "Process32FirstW".to_string(),
+                parameters: json!({ "note": "Process enumeration started (rate-limited log)." }),
+            },
+        );
+    }
     Process32FirstWHook.call(h_snapshot, lppe)
 }
 
 pub unsafe fn hooked_process32_next_w(h_snapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL {
-    log_event(LogLevel::Info, LogEvent::ProcessEnumeration {
-        function_name: "Process32NextW".to_string(),
-        parameters: json!({}),
-    });
+    // This hook is called repeatedly in a loop. We use the same rate limiter
+    // as Process32FirstW to avoid spamming the log. A single message from
+    // Process32FirstW is enough to indicate that enumeration is happening.
     Process32NextWHook.call(h_snapshot, lppe)
 }
 
@@ -288,14 +319,17 @@ pub unsafe fn hooked_create_file_w(
     h_template_file: HANDLE,
 ) -> HANDLE {
     if let Some(_guard) = ReentrancyGuard::new() {
-        log_event(LogLevel::Info, LogEvent::ApiHook {
-            function_name: "CreateFileW".to_string(),
-            parameters: json!({
-                "filePath": safe_u16_str(lp_file_name),
-                "desiredAccess": format_access_flags(dw_desired_access),
-            }),
-            stack_trace: None,
-        });
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "CreateFileW".to_string(),
+                parameters: json!({
+                    "filePath": safe_u16_str(lp_file_name),
+                    "desiredAccess": format_access_flags(dw_desired_access),
+                }),
+                stack_trace: None,
+            },
+        );
     }
 
     CreateFileWHook.call(
@@ -317,17 +351,38 @@ pub unsafe fn hooked_write_file(
     lp_number_of_bytes_written: *mut u32,
     lp_overlapped: *mut OVERLAPPED,
 ) -> BOOL {
-    if let Some(_guard) = ReentrancyGuard::new() {
-        log_event(LogLevel::Info, LogEvent::ApiHook {
-            function_name: "WriteFile".to_string(),
-            parameters: json!({
-                "bytesToWrite": n_number_of_bytes_to_write,
-                "dataPreview": format_buffer_preview(lp_buffer, n_number_of_bytes_to_write),
-            }),
-            stack_trace: None,
-        });
-    }
+    // Rate limit logging for WriteFile to avoid spam, especially from logging itself.
+    let should_log = {
+        let mut last_log_time = LAST_WRITE_FILE_LOG.lock().unwrap();
+        if let Some(last_time) = *last_log_time {
+            if last_time.elapsed() < GENERIC_LOG_COOLDOWN {
+                false
+            } else {
+                *last_log_time = Some(Instant::now());
+                true
+            }
+        } else {
+            *last_log_time = Some(Instant::now());
+            true
+        }
+    };
 
+    if should_log {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            log_event(
+                LogLevel::Info,
+                LogEvent::ApiHook {
+                    function_name: "WriteFile".to_string(),
+                    parameters: json!({
+                        "bytesToWrite": n_number_of_bytes_to_write,
+                        "dataPreview": format_buffer_preview(lp_buffer, n_number_of_bytes_to_write),
+                        "note": "(Rate-limited log)"
+                    }),
+                    stack_trace: None,
+                },
+            );
+        }
+    }
     WriteFileHook.call(
         h_file,
         lp_buffer,
@@ -338,15 +393,39 @@ pub unsafe fn hooked_write_file(
 }
 
 pub fn hooked_exit_process(u_exit_code: u32) -> ! {
+    // Check if termination is allowed by the controlling process.
+    if CONFIG
+        .termination_allowed
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        // If allowed, log it and call the original function.
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "ExitProcess".to_string(),
+                parameters: json!({
+                    "exit_code": u_exit_code,
+                    "action": "Termination was allowed by the analyzer."
+                }),
+                stack_trace: None,
+            },
+        );
+        unsafe { ExitProcessHook.call(u_exit_code) };
+    }
+
+    // If not allowed, block termination.
     let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
-    log_event(LogLevel::Fatal, LogEvent::ApiHook {
-        function_name: "ExitProcess".to_string(),
-        parameters: json!({
-            "exit_code": u_exit_code,
-            "action": "Termination blocked. The process will hang instead of exiting."
-        }),
-        stack_trace,
-    });
+    log_event(
+        LogLevel::Fatal,
+        LogEvent::ApiHook {
+            function_name: "ExitProcess".to_string(),
+            parameters: json!({
+                "exit_code": u_exit_code,
+                "action": "Termination blocked. The process will hang instead of exiting."
+            }),
+            stack_trace,
+        },
+    );
 
     // This function must not return to properly emulate ExitProcess.
     // We loop indefinitely to prevent the process from exiting.
@@ -356,31 +435,79 @@ pub fn hooked_exit_process(u_exit_code: u32) -> ! {
 }
 
 pub fn hooked_terminate_process(h_process: HANDLE, u_exit_code: u32) -> BOOL {
+    // Check if termination is allowed by the controlling process.
+    if CONFIG
+        .termination_allowed
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "TerminateProcess".to_string(),
+                parameters: json!({
+                    "process_handle": format!("{:?}", h_process),
+                    "exit_code": u_exit_code,
+                    "action": "Termination was allowed by the analyzer."
+                }),
+                stack_trace: None,
+            },
+        );
+        return unsafe { TerminateProcessHook.call(h_process, u_exit_code) };
+    }
+
+    // If not allowed, block termination.
     let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
-    log_event(LogLevel::Fatal, LogEvent::ApiHook {
-        function_name: "TerminateProcess".to_string(),
-        parameters: json!({
-            "process_handle": format!("{:?}", h_process),
-            "exit_code": u_exit_code,
-            "action": "Termination blocked. Returning FALSE."
-        }),
-        stack_trace,
-    });
+    log_event(
+        LogLevel::Fatal,
+        LogEvent::ApiHook {
+            function_name: "TerminateProcess".to_string(),
+            parameters: json!({
+                "process_handle": format!("{:?}", h_process),
+                "exit_code": u_exit_code,
+                "action": "Termination blocked. Returning FALSE."
+            }),
+            stack_trace,
+        },
+    );
 
     0 // Return FALSE to indicate that termination failed.
 }
 
 pub fn hooked_nt_terminate_process(h_process: HANDLE, exit_status: u32) -> i32 {
+    // Check if termination is allowed by the controlling process.
+    if CONFIG
+        .termination_allowed
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "NtTerminateProcess".to_string(),
+                parameters: json!({
+                    "process_handle": format!("{:?}", h_process),
+                    "exit_status": exit_status,
+                    "action": "Termination was allowed by the analyzer."
+                }),
+                stack_trace: None,
+            },
+        );
+        return unsafe { NtTerminateProcessHook.call(h_process, exit_status) };
+    }
+
+    // If not allowed, block termination.
     let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
-    log_event(LogLevel::Fatal, LogEvent::ApiHook {
-        function_name: "NtTerminateProcess".to_string(),
-        parameters: json!({
-            "process_handle": format!("{:?}", h_process),
-            "exit_status": exit_status,
-            "action": "Termination blocked. Returning STATUS_ACCESS_DENIED."
-        }),
-        stack_trace,
-    });
+    log_event(
+        LogLevel::Fatal,
+        LogEvent::ApiHook {
+            function_name: "NtTerminateProcess".to_string(),
+            parameters: json!({
+                "process_handle": format!("{:?}", h_process),
+                "exit_status": exit_status,
+                "action": "Termination blocked. Returning STATUS_ACCESS_DENIED."
+            }),
+            stack_trace,
+        },
+    );
 
     0xC0000022u32 as i32 // STATUS_ACCESS_DENIED
 }
@@ -393,15 +520,18 @@ pub fn hooked_http_send_request_w(
     dw_optional_length: u32,
 ) -> BOOL {
     let headers = unsafe { safe_u16_str(lpsz_headers) };
-    log_event(LogLevel::Info, LogEvent::ApiHook {
-        function_name: "HttpSendRequestW".to_string(),
-        parameters: json!({
-            "headers": headers,
-            "headers_length": dw_headers_length,
-            "optional_data_length": dw_optional_length,
-        }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Info,
+        LogEvent::ApiHook {
+            function_name: "HttpSendRequestW".to_string(),
+            parameters: json!({
+                "headers": headers,
+                "headers_length": dw_headers_length,
+                "optional_data_length": dw_optional_length,
+            }),
+            stack_trace: None,
+        },
+    );
 
     unsafe {
         HttpSendRequestWHook.call(
@@ -422,22 +552,28 @@ pub fn hooked_get_addr_info_w(
 ) -> i32 {
     let node_name = unsafe { safe_u16_str(p_node_name) };
     let service_name = unsafe { safe_u16_str(p_service_name) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "GetAddrInfoW".to_string(),
-        parameters: json!({ "node_name": node_name, "service_name": service_name }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "GetAddrInfoW".to_string(),
+            parameters: json!({ "node_name": node_name, "service_name": service_name }),
+            stack_trace: None,
+        },
+    );
     unsafe { GetAddrInfoWHook.call(p_node_name, p_service_name, p_hints, pp_result) }
 }
 
 pub fn hooked_message_box_w(h_wnd: HWND, text: *const u16, caption: *const u16, u_type: u32) -> i32 {
     let text_str = unsafe { safe_u16_str(text) };
     let caption_str = unsafe { safe_u16_str(caption) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "MessageBoxW".to_string(),
-        parameters: json!({ "title": caption_str, "text": text_str, "type": u_type }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "MessageBoxW".to_string(),
+            parameters: json!({ "title": caption_str, "text": text_str, "type": u_type }),
+            stack_trace: None,
+        },
+    );
     unsafe { MessageBoxWHook.call(h_wnd, text, caption, u_type) }
 }
 
@@ -460,11 +596,14 @@ pub fn hooked_connect(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
                         .into_owned()
                 }
             };
-            log_event(LogLevel::Debug, LogEvent::ApiHook {
-                function_name: "connect".to_string(),
-                parameters: json!({ "target_ip": ip_str, "port": port }),
-                stack_trace: None,
-            });
+            log_event(
+                LogLevel::Debug,
+                LogEvent::ApiHook {
+                    function_name: "connect".to_string(),
+                    parameters: json!({ "target_ip": ip_str, "port": port }),
+                    stack_trace: None,
+                },
+            );
         }
     }
     unsafe { ConnectHook.call(s, name, namelen) }
@@ -492,11 +631,14 @@ pub fn hooked_reg_create_key_ex_w(
     lpdw_disposition: *mut u32,
 ) -> u32 {
     let sub_key = unsafe { safe_u16_str(lp_sub_key) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "RegCreateKeyExW".to_string(),
-        parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "RegCreateKeyExW".to_string(),
+            parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
+            stack_trace: None,
+        },
+    );
     unsafe {
         RegCreateKeyExWHook.call(
             hkey,
@@ -521,31 +663,40 @@ pub fn hooked_reg_set_value_ex_w(
     cb_data: u32,
 ) -> u32 {
     let value_name = unsafe { safe_u16_str(lp_value_name) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "RegSetValueExW".to_string(),
-        parameters: json!({ "key": hkey_to_string(hkey), "value_name": value_name, "type": dw_type, "bytes": cb_data }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "RegSetValueExW".to_string(),
+            parameters: json!({ "key": hkey_to_string(hkey), "value_name": value_name, "type": dw_type, "bytes": cb_data }),
+            stack_trace: None,
+        },
+    );
     unsafe { RegSetValueExWHook.call(hkey, lp_value_name, _reserved, dw_type, lp_data, cb_data) }
 }
 
 pub fn hooked_reg_delete_key_w(hkey: HKEY, lp_sub_key: *const u16) -> u32 {
     let sub_key = unsafe { safe_u16_str(lp_sub_key) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "RegDeleteKeyW".to_string(),
-        parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "RegDeleteKeyW".to_string(),
+            parameters: json!({ "path": format!("{}\\{}", hkey_to_string(hkey), sub_key) }),
+            stack_trace: None,
+        },
+    );
     unsafe { RegDeleteKeyWHook.call(hkey, lp_sub_key) }
 }
 
 pub fn hooked_delete_file_w(lp_file_name: *const u16) -> BOOL {
     let file_name = unsafe { safe_u16_str(lp_file_name) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "DeleteFileW".to_string(),
-        parameters: json!({ "file_name": file_name }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "DeleteFileW".to_string(),
+            parameters: json!({ "file_name": file_name }),
+            stack_trace: None,
+        },
+    );
     unsafe { DeleteFileWHook.call(lp_file_name) }
 }
 
@@ -596,15 +747,18 @@ pub unsafe fn hooked_open_process(
     dw_process_id: u32,
 ) -> HANDLE {
     let target_name = get_process_name_by_pid(dw_process_id);
-    log_event(LogLevel::Warn, LogEvent::ApiHook {
-        function_name: "OpenProcess".to_string(),
-        parameters: json!({
-            "target_pid": dw_process_id,
-            "target_name": target_name,
-            "desired_access": dw_desired_access,
-        }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Warn,
+        LogEvent::ApiHook {
+            function_name: "OpenProcess".to_string(),
+            parameters: json!({
+                "target_pid": dw_process_id,
+                "target_name": target_name,
+                "desired_access": dw_desired_access,
+            }),
+            stack_trace: None,
+        },
+    );
     OpenProcessHook.call(dw_desired_access, b_inherit_handle, dw_process_id)
 }
 
@@ -615,16 +769,19 @@ pub unsafe fn hooked_write_process_memory(
     n_size: usize,
     lp_number_of_bytes_written: *mut usize,
 ) -> BOOL {
-    log_event(LogLevel::Warn, LogEvent::ApiHook {
-        function_name: "WriteProcessMemory".to_string(),
-        parameters: json!({
-            "target_process_handle": h_process as usize,
-            "base_address": lp_base_address as usize,
-            "size": n_size,
-            "data_preview": format_buffer_preview(lp_buffer as *const u8, n_size as u32),
-        }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Warn,
+        LogEvent::ApiHook {
+            function_name: "WriteProcessMemory".to_string(),
+            parameters: json!({
+                "target_process_handle": h_process as usize,
+                "base_address": lp_base_address as usize,
+                "size": n_size,
+                "data_preview": format_buffer_preview(lp_buffer as *const u8, n_size as u32),
+            }),
+            stack_trace: None,
+        },
+    );
     WriteProcessMemoryHook.call(
         h_process,
         lp_base_address,
@@ -652,7 +809,7 @@ pub unsafe fn hooked_virtual_alloc_ex(
     if !result.is_null() {
         if let Some(_guard) = ReentrancyGuard::new() {
             let stack_trace = capture_stack_trace(CONFIG.stack_trace_frame_limit);
-            
+
             // Forward allocation info to the VMP dumper module.
             crate::vmp_dumper::track_memory_allocation(
                 result as usize,
@@ -661,16 +818,19 @@ pub unsafe fn hooked_virtual_alloc_ex(
                 stack_trace.clone(),
             );
 
-            log_event(LogLevel::Info, LogEvent::ApiHook {
-                function_name: "VirtualAllocEx".to_string(),
-                parameters: json!({
-                    "process_handle": h_process as usize,
-                    "address": result as usize,
-                    "size": dw_size,
-                    "protection": format!("{:#X}", fl_protect),
-                }),
-                stack_trace: Some(stack_trace),
-            });
+            log_event(
+                LogLevel::Info,
+                LogEvent::ApiHook {
+                    function_name: "VirtualAllocEx".to_string(),
+                    parameters: json!({
+                        "process_handle": h_process as usize,
+                        "address": result as usize,
+                        "size": dw_size,
+                        "protection": format!("{:#X}", fl_protect),
+                    }),
+                    stack_trace: Some(stack_trace),
+                },
+            );
         }
     }
 
@@ -687,11 +847,14 @@ pub fn hooked_create_remote_thread(
     lp_thread_id: *mut u32,
 ) -> HANDLE {
     let start_address_val = lp_start_address.map_or(0, |f| f as usize);
-    log_event(LogLevel::Warn, LogEvent::ApiHook {
-        function_name: "CreateRemoteThread".to_string(),
-        parameters: json!({ "target_process_handle": h_process as usize, "start_address": start_address_val }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Warn,
+        LogEvent::ApiHook {
+            function_name: "CreateRemoteThread".to_string(),
+            parameters: json!({ "target_process_handle": h_process as usize, "start_address": start_address_val }),
+            stack_trace: None,
+        },
+    );
     unsafe {
         CreateRemoteThreadHook.call(
             h_process,
@@ -707,11 +870,14 @@ pub fn hooked_create_remote_thread(
 
 pub fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
     let lib_name = unsafe { safe_u16_str(lp_lib_file_name) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "LoadLibraryW".to_string(),
-        parameters: json!({ "library_name": lib_name }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "LoadLibraryW".to_string(),
+            parameters: json!({ "library_name": lib_name }),
+            stack_trace: None,
+        },
+    );
     unsafe { LoadLibraryWHook.call(lp_lib_file_name) }
 }
 
@@ -721,11 +887,14 @@ pub fn hooked_load_library_ex_w(
     dw_flags: u32,
 ) -> HINSTANCE {
     let lib_name = unsafe { safe_u16_str(lp_lib_file_name) };
-    log_event(LogLevel::Debug, LogEvent::ApiHook {
-        function_name: "LoadLibraryExW".to_string(),
-        parameters: json!({ "library_name": lib_name, "flags": dw_flags }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Debug,
+        LogEvent::ApiHook {
+            function_name: "LoadLibraryExW".to_string(),
+            parameters: json!({ "library_name": lib_name, "flags": dw_flags }),
+            stack_trace: None,
+        },
+    );
     unsafe { LoadLibraryExWHook.call(lp_lib_file_name, h_file, dw_flags) }
 }
 
@@ -743,11 +912,14 @@ pub fn hooked_create_process_w(
 ) -> BOOL {
     let app_name = unsafe { safe_u16_str(lp_application_name) };
     let cmd_line = unsafe { safe_u16_str(lp_command_line) };
-    log_event(LogLevel::Warn, LogEvent::ApiHook {
-        function_name: "CreateProcessW".to_string(),
-        parameters: json!({ "application_name": app_name, "command_line": cmd_line }),
-        stack_trace: None,
-    });
+    log_event(
+        LogLevel::Warn,
+        LogEvent::ApiHook {
+            function_name: "CreateProcessW".to_string(),
+            parameters: json!({ "application_name": app_name, "command_line": cmd_line }),
+            stack_trace: None,
+        },
+    );
     unsafe {
         CreateProcessWHook.call(
             lp_application_name,
@@ -768,14 +940,17 @@ pub unsafe fn hooked_add_vectored_exception_handler(
     first: u32,
     handler: PVECTORED_EXCEPTION_HANDLER,
 ) -> *mut c_void {
-    log_event(LogLevel::Warn, LogEvent::ApiHook {
-        function_name: "AddVectoredExceptionHandler".to_string(),
-        parameters: json!({
-            "handler_address": handler.map_or(0, |h| h as usize),
-            "is_first": first != 0,
-        }),
-        stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-    });
+    log_event(
+        LogLevel::Warn,
+        LogEvent::ApiHook {
+            function_name: "AddVectoredExceptionHandler".to_string(),
+            parameters: json!({
+                "handler_address": handler.map_or(0, |h| h as usize),
+                "is_first": first != 0,
+            }),
+            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+        },
+    );
 
     AddVectoredExceptionHandlerHook.call(first, handler)
 }
@@ -788,26 +963,32 @@ pub unsafe fn hooked_create_thread(
     flags: u32,
     thread_id: *mut u32,
 ) -> HANDLE {
-    log_event(LogLevel::Info, LogEvent::ApiHook {
-        function_name: "CreateThread".to_string(),
-        parameters: json!({
-            "start_address": start_addr.map_or(0, |f| f as usize),
-            "flags": flags,
-        }),
-        stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-    });
+    log_event(
+        LogLevel::Info,
+        LogEvent::ApiHook {
+            function_name: "CreateThread".to_string(),
+            parameters: json!({
+                "start_address": start_addr.map_or(0, |f| f as usize),
+                "flags": flags,
+            }),
+            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+        },
+    );
 
     CreateThreadHook.call(attrs, stack_size, start_addr, param, flags, thread_id)
 }
 
 pub unsafe fn hooked_free_library(module: HINSTANCE) -> BOOL {
-    log_event(LogLevel::Info, LogEvent::ApiHook {
-        function_name: "FreeLibrary".to_string(),
-        parameters: json!({
-            "module_handle": module as usize,
-        }),
-        stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-    });
+    log_event(
+        LogLevel::Info,
+        LogEvent::ApiHook {
+            function_name: "FreeLibrary".to_string(),
+            parameters: json!({
+                "module_handle": module as usize,
+            }),
+            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+        },
+    );
 
     FreeLibraryHook.call(module)
 }
@@ -824,14 +1005,17 @@ pub unsafe fn hooked_crypt_encrypt(
     let len = if !data_len.is_null() { *data_len } else { 0 };
 
     if let Some(_guard) = ReentrancyGuard::new() {
-        log_event(LogLevel::Info, LogEvent::ApiHook {
-            function_name: "CryptEncrypt".to_string(),
-            parameters: json!({
-                "data_length_before": len,
-                "data_preview": format_buffer_preview(data, len),
-            }),
-            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-        });
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "CryptEncrypt".to_string(),
+                parameters: json!({
+                    "data_length_before": len,
+                    "data_preview": format_buffer_preview(data, len),
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
     }
 
     let result = CryptEncryptHook.call(key, hash, final_op, flags, data, data_len, buffer_len);
@@ -839,14 +1023,17 @@ pub unsafe fn hooked_crypt_encrypt(
     if result != 0 {
         if let Some(_guard) = ReentrancyGuard::new() {
             let len_after = if !data_len.is_null() { *data_len } else { 0 };
-            log_event(LogLevel::Info, LogEvent::ApiHook {
-                function_name: "CryptEncrypt (Post-call)".to_string(),
-                parameters: json!({
-                    "data_length_after": len_after,
-                    "encrypted_data_preview": format_buffer_preview(data, len_after),
-                }),
-                stack_trace: None,
-            });
+            log_event(
+                LogLevel::Info,
+                LogEvent::ApiHook {
+                    function_name: "CryptEncrypt (Post-call)".to_string(),
+                    parameters: json!({
+                        "data_length_after": len_after,
+                        "encrypted_data_preview": format_buffer_preview(data, len_after),
+                    }),
+                    stack_trace: None,
+                },
+            );
         }
     }
 
@@ -864,14 +1051,17 @@ pub unsafe fn hooked_crypt_decrypt(
     let len = if !data_len.is_null() { *data_len } else { 0 };
 
     if let Some(_guard) = ReentrancyGuard::new() {
-        log_event(LogLevel::Info, LogEvent::ApiHook {
-            function_name: "CryptDecrypt".to_string(),
-            parameters: json!({
-                "data_length_before": len,
-                "encrypted_data_preview": format_buffer_preview(data, len),
-            }),
-            stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
-        });
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "CryptDecrypt".to_string(),
+                parameters: json!({
+                    "data_length_before": len,
+                    "encrypted_data_preview": format_buffer_preview(data, len),
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
     }
 
     let result = CryptDecryptHook.call(key, hash, final_op, flags, data, data_len);
@@ -879,14 +1069,17 @@ pub unsafe fn hooked_crypt_decrypt(
     if result != 0 {
         if let Some(_guard) = ReentrancyGuard::new() {
             let len_after = if !data_len.is_null() { *data_len } else { 0 };
-            log_event(LogLevel::Info, LogEvent::ApiHook {
-                function_name: "CryptDecrypt (Post-call)".to_string(),
-                parameters: json!({
-                    "data_length_after": len_after,
-                    "decrypted_data_preview": format_buffer_preview(data, len_after),
-                }),
-                stack_trace: None,
-            });
+            log_event(
+                LogLevel::Info,
+                LogEvent::ApiHook {
+                    function_name: "CryptDecrypt (Post-call)".to_string(),
+                    parameters: json!({
+                        "data_length_after": len_after,
+                        "decrypted_data_preview": format_buffer_preview(data, len_after),
+                    }),
+                    stack_trace: None,
+                },
+            );
         }
     }
 
@@ -984,7 +1177,6 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
     hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
     hook!(LoadLibraryExWHook, LoadLibraryExW, hooked_load_library_ex_w);
 
-
     // Hook registry functions.
     hook!(
         RegCreateKeyExWHook,
@@ -1005,7 +1197,9 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
         CreateRemoteThread,
         hooked_create_remote_thread
     );
-    hook!(CreateThreadHook, CreateThread, |a, b, c, d, e, f| hooked_create_thread(a, b, c, d, e, f));
+    hook!(CreateThreadHook, CreateThread, |a, b, c, d, e, f| {
+        hooked_create_thread(a, b, c, d, e, f)
+    });
 
     // Hook exception handling
     hook!(
@@ -1074,7 +1268,10 @@ unsafe fn initialize_dynamic_hooks() -> Result<(), String> {
         }
     }
 
-    let wininet_name: Vec<u16> = "wininet.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    let wininet_name: Vec<u16> = "wininet.dll"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let wininet = GetModuleHandleW(wininet_name.as_ptr());
     if wininet != 0 {
         if let Some(addr) = GetProcAddress(wininet, b"HttpSendRequestW\0".as_ptr()) {
@@ -1086,15 +1283,23 @@ unsafe fn initialize_dynamic_hooks() -> Result<(), String> {
         }
     }
 
-    let kernel32_name: Vec<u16> = "kernel32.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    let kernel32_name: Vec<u16> = "kernel32.dll"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let kernel32 = GetModuleHandleW(kernel32_name.as_ptr());
     if kernel32 != 0 {
         if let Some(addr) = GetProcAddress(kernel32, b"FreeLibrary\0".as_ptr()) {
-            hook!(FreeLibraryHook, std::mem::transmute(addr), |a| hooked_free_library(a));
+            hook!(FreeLibraryHook, std::mem::transmute(addr), |a| {
+                hooked_free_library(a)
+            });
         }
     }
 
-    let advapi32_name: Vec<u16> = "advapi32.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    let advapi32_name: Vec<u16> = "advapi32.dll"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let advapi32 = GetModuleHandleW(advapi32_name.as_ptr());
     if advapi32 != 0 {
         if let Some(addr) = GetProcAddress(advapi32, b"CryptEncrypt\0".as_ptr()) {
