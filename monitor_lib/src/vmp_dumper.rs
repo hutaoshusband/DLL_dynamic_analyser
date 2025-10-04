@@ -2,8 +2,9 @@
 
 use crate::config::LogLevel;
 use crate::logging::LogEvent;
-use crate::log_event;
+use crate::{log_event, SUSPICION_SCORE};
 use chrono::{DateTime, Utc};
+use std::sync::atomic::Ordering;
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use std::mem;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::slice;
+use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -26,6 +28,9 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     TH32CS_SNAPMODULE32,
 };
 use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
+use windows_sys::Win32::System::Memory::{
+    PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
 
@@ -79,6 +84,31 @@ pub fn track_memory_allocation(
     protection: u32,
     stack_trace: Vec<String>,
 ) {
+    // If the newly allocated memory is executable, analyze it for signs of unpacking.
+    let is_executable = (protection & PAGE_EXECUTE) != 0
+        || (protection & PAGE_EXECUTE_READ) != 0
+        || (protection & PAGE_EXECUTE_READWRITE) != 0
+        || (protection & PAGE_EXECUTE_WRITECOPY) != 0;
+
+    if is_executable && size > 0 {
+        const PREVIEW_SIZE: usize = 64; // Analyze the first 64 bytes.
+        let read_size = std::cmp::min(size, PREVIEW_SIZE);
+        let mut buffer = vec![0u8; read_size];
+
+        unsafe {
+            if ReadProcessMemory(
+                GetCurrentProcess(),
+                address as *const c_void,
+                buffer.as_mut_ptr() as *mut c_void,
+                read_size,
+                std::ptr::null_mut(),
+            ) != 0
+            {
+                analyze_unpacked_code(&buffer, address);
+            }
+        }
+    }
+
     if let Ok(mut state) = VMP_STATE.lock() {
         let region = AllocatedRegion {
             address,
@@ -101,6 +131,46 @@ pub fn track_memory_allocation(
         );
 
         state.allocations.insert(address, region);
+    }
+}
+
+/// Analyzes a slice of bytes from newly executable memory for signs of unpacking.
+fn analyze_unpacked_code(code: &[u8], base_address: usize) {
+    const BITNESS: u32 = 64;
+    let mut decoder = Decoder::with_ip(BITNESS, code, base_address as u64, DecoderOptions::NONE);
+    let mut formatter = NasmFormatter::new();
+
+    for instr in decoder.iter().take(10) { // Analyze first 10 instructions
+        // Check for popad (0x61), a common instruction at the end of an unpacker stub.
+        if instr.code() == iced_x86::Code::Popad {
+            SUSPICION_SCORE.fetch_add(5, Ordering::Relaxed);
+            log_event(
+                LogLevel::Warn,
+                LogEvent::UnpackerActivity {
+                    source_address: instr.ip() as usize,
+                    finding: "POPAD Instruction Found".to_string(),
+                    details: format!("Found 'popad' at {:#X}. This often signifies the end of an unpacker stub.", instr.ip()),
+                },
+            );
+        }
+
+        // Check for jumps or calls, which might lead to the Original Entry Point (OEP).
+        if instr.is_jcc_short_or_near() || instr.is_jmp_short_or_near() || instr.is_call_near() {
+            let target_addr = instr.near_branch_target();
+            SUSPICION_SCORE.fetch_add(3, Ordering::Relaxed);
+            log_event(
+                LogLevel::Warn,
+                LogEvent::UnpackerActivity {
+                    source_address: instr.ip() as usize,
+                    finding: "Potential OEP Jump/Call".to_string(),
+                    details: format!(
+                        "Found jump/call from {:#X} to {:#X}. This could be a jump to the Original Entry Point.",
+                        instr.ip(),
+                        target_addr
+                    ),
+                },
+            );
+        }
     }
 }
 

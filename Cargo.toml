@@ -39,4 +39,5 @@ windows-sys = { version = "0.52.0", features = [
     "Win32_Security_Cryptography_Certificates",
     "Win32_Security_Cryptography_Catalog",
     "Win32_System_WindowsProgramming",
+    "Win32_System_Performance",
 ] }

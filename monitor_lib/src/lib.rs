@@ -9,6 +9,8 @@ mod iat_monitor;
 mod logging;
 mod scanner;
 mod vmp_dumper;
+mod static_analyzer;
+mod string_dumper;
 
 use crate::config::{LogLevel, CONFIG};
 use crate::hooks::cpprest_hook;
@@ -22,7 +24,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -33,6 +35,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcessId, Sleep};
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
 
 // Globals for logging and thread management.
+pub static SUSPICION_SCORE: AtomicUsize = AtomicUsize::new(0);
 static LOG_SENDER: OnceCell<Sender<Option<(LogLevel, LogEvent)>>> = OnceCell::new();
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 static SCANNER_THREAD_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
@@ -75,7 +78,7 @@ pub fn log_event(level: LogLevel, event: LogEvent) {
 }
 
 fn logging_thread_main(receiver: Receiver<Option<(LogLevel, LogEvent)>>) {
-    let (mut pipe_handle, mut log_file) = {
+    let (pipe_handle, mut log_file) = {
         // The initialization of the pipe and log file involves calling Windows APIs
         // that we are hooking (e.g., CreateFileW). To prevent these initial calls
         // from generating log events that would then try to write to a not-yet-ready
@@ -229,6 +232,9 @@ fn dll_main_internal() -> Result<(), String> {
 
     // Spawn a thread for the cpprest hook.
     thread::spawn(cpprest_hook::initialize_and_enable_hook);
+
+    // Start the string dumper thread.
+    string_dumper::start_string_dumper();
 
     // Spawn the memory scanner thread.
     let scanner_handle = thread::spawn(|| {

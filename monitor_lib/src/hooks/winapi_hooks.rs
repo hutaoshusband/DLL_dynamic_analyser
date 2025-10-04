@@ -1,8 +1,9 @@
 use crate::config::{LogLevel, CONFIG};
 use crate::logging::{capture_stack_trace, LogEvent};
-use crate::log_event;
+use crate::{log_event, SUSPICION_SCORE};
 use crate::ReentrancyGuard;
 use once_cell::sync::Lazy;
+use std::sync::atomic::Ordering;
 use retour::static_detour;
 use serde_json::json;
 use std::collections::HashMap;
@@ -27,7 +28,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, CheckRemoteDebuggerPresent, IsDebuggerPresent,
-    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory,
+    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory, OutputDebugStringA,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -45,6 +46,8 @@ use windows_sys::Win32::System::Threading::{
     LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW, STARTUPINFOW, THREAD_CREATION_FLAGS, TerminateProcess,
 };
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
 use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 
 type HINTERNET = isize;
@@ -57,6 +60,9 @@ static LAST_IS_DEBUGGER_PRESENT_LOG: Lazy<Mutex<Option<Instant>>> =
     Lazy::new(|| Mutex::new(None));
 static LAST_PROCESS_ENUM_LOG: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
 static LAST_WRITE_FILE_LOG: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+static LAST_GET_TICK_COUNT_LOG: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+static LAST_QUERY_PERF_COUNTER_LOG: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+
 
 const GENERIC_LOG_COOLDOWN: Duration = Duration::from_secs(5);
 
@@ -67,6 +73,19 @@ unsafe fn safe_u16_str(ptr: *const u16) -> String {
         "<null_string_ptr>".to_string()
     } else {
         U16CStr::from_ptr_str(ptr).to_string_lossy()
+    }
+}
+
+/// Safely converts a null-terminated UTF-8 string pointer to a Rust String.
+/// Returns a placeholder if the pointer is null.
+unsafe fn safe_u8_str(ptr: *const u8) -> String {
+    if ptr.is_null() {
+        "<null_string_ptr>".to_string()
+    } else {
+        // Treat the *const u8 as a C-style string.
+        std::ffi::CStr::from_ptr(ptr as *const i8)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -141,6 +160,10 @@ static_detour! {
     pub static Process32FirstWHook: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL;
     pub static Process32NextWHook: unsafe extern "system" fn(HANDLE, *mut PROCESSENTRY32W) -> BOOL;
     pub static ExitProcessHook: unsafe extern "system" fn(u32) -> !;
+    pub static GetTickCountHook: unsafe extern "system" fn() -> u32;
+    pub static QueryPerformanceCounterHook: unsafe extern "system" fn(*mut i64) -> BOOL;
+    pub static OutputDebugStringAHook: unsafe extern "system" fn(*const u8);
+
 
     // New hooks for VMP analysis
     pub static AddVectoredExceptionHandlerHook: unsafe extern "system" fn(u32, PVECTORED_EXCEPTION_HANDLER) -> *mut c_void;
@@ -175,6 +198,7 @@ pub fn hooked_is_debugger_present() -> BOOL {
 
     if should_log {
         if let Some(_guard) = ReentrancyGuard::new() {
+            SUSPICION_SCORE.fetch_add(1, Ordering::Relaxed);
             log_event(
                 LogLevel::Warn,
                 LogEvent::AntiDebugCheck {
@@ -197,6 +221,7 @@ pub unsafe fn hooked_check_remote_debugger_present(
     pb_is_debugger_present: *mut BOOL,
 ) -> BOOL {
     if let Some(_guard) = ReentrancyGuard::new() {
+        SUSPICION_SCORE.fetch_add(1, Ordering::Relaxed);
         log_event(
             LogLevel::Warn,
             LogEvent::AntiDebugCheck {
@@ -228,6 +253,7 @@ pub unsafe fn hooked_nt_query_information_process(
     const PROCESS_DEBUG_PORT: u32 = 7;
     if process_information_class == PROCESS_DEBUG_PORT {
         if let Some(_guard) = ReentrancyGuard::new() {
+            SUSPICION_SCORE.fetch_add(2, Ordering::Relaxed);
             log_event(
                 LogLevel::Warn,
                 LogEvent::AntiDebugCheck {
@@ -258,6 +284,98 @@ pub unsafe fn hooked_nt_query_information_process(
         process_information_length,
         return_length,
     )
+}
+
+pub fn hooked_get_tick_count() -> u32 {
+    let should_log = {
+        let mut last_log_time = LAST_GET_TICK_COUNT_LOG.lock().unwrap();
+        if let Some(last_time) = *last_log_time {
+            if last_time.elapsed() < GENERIC_LOG_COOLDOWN {
+                false
+            } else {
+                *last_log_time = Some(Instant::now());
+                true
+            }
+        } else {
+            *last_log_time = Some(Instant::now());
+            true
+        }
+    };
+
+    if should_log {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            SUSPICION_SCORE.fetch_add(1, Ordering::Relaxed);
+            SUSPICION_SCORE.fetch_add(1, Ordering::Relaxed);
+            log_event(
+                LogLevel::Info,
+                LogEvent::AntiDebugCheck {
+                    function_name: "GetTickCount".to_string(),
+                    parameters: json!({
+                        "note": "Frequent timing check, potential anti-debugging or performance measurement.",
+                        "log_type": "(Rate-limited log)"
+                    }),
+                    stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+                },
+            );
+        }
+    }
+
+    unsafe { GetTickCountHook.call() }
+}
+
+pub unsafe fn hooked_query_performance_counter(lp_performance_count: *mut i64) -> BOOL {
+    let should_log = {
+        let mut last_log_time = LAST_QUERY_PERF_COUNTER_LOG.lock().unwrap();
+        if let Some(last_time) = *last_log_time {
+            if last_time.elapsed() < GENERIC_LOG_COOLDOWN {
+                false
+            } else {
+                *last_log_time = Some(Instant::now());
+                true
+            }
+        } else {
+            *last_log_time = Some(Instant::now());
+            true
+        }
+    };
+
+    if should_log {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            log_event(
+                LogLevel::Info,
+                LogEvent::AntiDebugCheck {
+                    function_name: "QueryPerformanceCounter".to_string(),
+                    parameters: json!({
+                        "note": "Frequent timing check, potential anti-debugging or performance measurement.",
+                        "log_type": "(Rate-limited log)"
+                    }),
+                    stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+                },
+            );
+        }
+    }
+
+    QueryPerformanceCounterHook.call(lp_performance_count)
+}
+
+pub unsafe fn hooked_output_debug_string_a(lp_output_string: *const u8) {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        SUSPICION_SCORE.fetch_add(1, Ordering::Relaxed);
+        log_event(
+            LogLevel::Info,
+            LogEvent::AntiDebugCheck {
+                function_name: "OutputDebugStringA".to_string(),
+                parameters: json!({
+                    "output_string": safe_u8_str(lp_output_string),
+                    "note": "Attempt to communicate with a debugger.",
+                }),
+                stack_trace: None,
+            },
+        );
+    }
+
+    // Call the original function to maintain normal behavior if a debugger is attached.
+    OutputDebugStringAHook.call(lp_output_string);
 }
 
 pub unsafe fn hooked_create_toolhelp32_snapshot(dw_flags: u32, th32_process_id: u32) -> HANDLE {
@@ -414,6 +532,9 @@ pub fn hooked_exit_process(u_exit_code: u32) -> ! {
     }
 
     // If not allowed, block termination.
+    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
+    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
+    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
     let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
     log_event(
         LogLevel::Fatal,
@@ -769,6 +890,7 @@ pub unsafe fn hooked_write_process_memory(
     n_size: usize,
     lp_number_of_bytes_written: *mut usize,
 ) -> BOOL {
+    SUSPICION_SCORE.fetch_add(5, Ordering::Relaxed);
     log_event(
         LogLevel::Warn,
         LogEvent::ApiHook {
@@ -846,6 +968,7 @@ pub fn hooked_create_remote_thread(
     dw_creation_flags: THREAD_CREATION_FLAGS,
     lp_thread_id: *mut u32,
 ) -> HANDLE {
+    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
     let start_address_val = lp_start_address.map_or(0, |f| f as usize);
     log_event(
         LogLevel::Warn,
@@ -871,14 +994,38 @@ pub fn hooked_create_remote_thread(
 pub fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
     let lib_name = unsafe { safe_u16_str(lp_lib_file_name) };
     log_event(
-        LogLevel::Debug,
+        LogLevel::Info,
         LogEvent::ApiHook {
             function_name: "LoadLibraryW".to_string(),
-            parameters: json!({ "library_name": lib_name }),
+            parameters: json!({ "library_name": lib_name.clone() }),
             stack_trace: None,
         },
     );
-    unsafe { LoadLibraryWHook.call(lp_lib_file_name) }
+
+    let module_handle = unsafe { LoadLibraryWHook.call(lp_lib_file_name) };
+
+    if module_handle != 0 {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            // We have a valid handle, now let's read the module from memory for analysis.
+            unsafe {
+                let dos_header = &*(module_handle as *const windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER);
+                if dos_header.e_magic == 0x5A4D { // "MZ"
+                    let nt_headers_ptr = (module_handle as usize + dos_header.e_lfanew as usize)
+                        as *const windows_sys::Win32::System::Diagnostics::Debug::IMAGE_NT_HEADERS64;
+                    let nt_headers = &*nt_headers_ptr;
+                    if nt_headers.Signature == 0x4550 { // "PE\0\0"
+                        let size_of_image = nt_headers.OptionalHeader.SizeOfImage;
+                        let module_data = slice::from_raw_parts(module_handle as *const u8, size_of_image as usize);
+                        
+                        // Run static analysis on the loaded module.
+                        crate::static_analyzer::analyze_module(module_data);
+                    }
+                }
+            }
+        }
+    }
+
+    module_handle
 }
 
 pub fn hooked_load_library_ex_w(
@@ -940,6 +1087,7 @@ pub unsafe fn hooked_add_vectored_exception_handler(
     first: u32,
     handler: PVECTORED_EXCEPTION_HANDLER,
 ) -> *mut c_void {
+    SUSPICION_SCORE.fetch_add(3, Ordering::Relaxed);
     log_event(
         LogLevel::Warn,
         LogEvent::ApiHook {
@@ -1130,6 +1278,17 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
         CheckRemoteDebuggerPresentHook,
         CheckRemoteDebuggerPresent,
         |a, b| hooked_check_remote_debugger_present(a, b)
+    );
+    hook!(GetTickCountHook, GetTickCount, hooked_get_tick_count);
+    hook!(
+        QueryPerformanceCounterHook,
+        QueryPerformanceCounter,
+        |a| hooked_query_performance_counter(a)
+    );
+    hook!(
+        OutputDebugStringAHook,
+        OutputDebugStringA,
+        |a| hooked_output_debug_string_a(a)
     );
 
     // Process enumeration hooks
