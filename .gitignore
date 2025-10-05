@@ -1,0 +1,4 @@
+/target/
+/cs2_creator/cs2_creator.exe
+/monitor_lib/monitor_lib.dll
+*.log
