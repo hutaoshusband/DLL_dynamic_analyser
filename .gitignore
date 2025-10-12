@@ -1,0 +1,31 @@
+# Ignore build artifacts
+/target/
+
+# Ignore dependency sources and build scripts
+/cargo/
+/cs2_creator/cargo/
+
+# Ignore lockfiles if they are not meant to be shared
+# Cargo.lock
+# package-lock.json
+
+# Ignore other potential build outputs
+/build/
+/dist/
+*.log
+*.so
+*.dll
+*.exe
+*.o
+*.a
+*.lib
+
+# Ignore IDE/editor specific files
+.vscode/
+.idea/
+*.suo
+*.user
+*.iml
+*.ipr
+*.iws
+.DS_Store

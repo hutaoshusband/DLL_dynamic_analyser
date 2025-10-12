@@ -1,4 +1,4 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 #![cfg(windows)]
 
 mod code_monitor;

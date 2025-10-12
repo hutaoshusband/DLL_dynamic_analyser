@@ -38,6 +38,10 @@ pub struct MonitorConfig {
     pub string_dump_enabled: bool,
     pub vmp_dump_enabled: bool,
     pub manual_map_scan_enabled: bool,
+    pub network_hooks_enabled: bool,
+    pub crypto_hooks_enabled: bool,
+    pub registry_hooks_enabled: bool,
+    pub log_network_data: bool,
 }
 
 impl Default for MonitorConfig {
@@ -48,6 +52,10 @@ impl Default for MonitorConfig {
             string_dump_enabled: false,
             vmp_dump_enabled: true,
             manual_map_scan_enabled: true,
+            network_hooks_enabled: true,
+            crypto_hooks_enabled: true,
+            registry_hooks_enabled: true,
+            log_network_data: false,
         }
     }
 }

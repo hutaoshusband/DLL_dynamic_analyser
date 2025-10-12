@@ -29,12 +29,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DeleteFileW, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE, CopyFileW, MoveFileW, GetTempPathW, GetTempFileNameW, FindFirstFileW, FindNextFileW,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessA, QueueUserAPC, SetThreadContext, WinExec,
+    CreateProcessA, QueueUserAPC, WinExec,
 };
 use windows_sys::Win32::UI::Shell::{ShellExecuteExW, ShellExecuteW};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, CheckRemoteDebuggerPresent, IsDebuggerPresent,
-    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory, OutputDebugStringA,
+    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory, OutputDebugStringA, SetThreadContext,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -153,9 +153,9 @@ static_detour! {
     ) -> u32;
     pub static RegDeleteKeyWHook: unsafe extern "system" fn(HKEY, *const u16) -> u32;
     pub static RegOpenKeyExWHook: unsafe extern "system" fn(HKEY, *const u16, u32, u32, *mut HKEY) -> u32;
-    pub static RegQueryValueExWHook: unsafe extern "system" fn(HKEY, *const u16, *mut u32, *mut u32, *mut u8, *mut u32) -> u32;
-    pub static RegEnumKeyExWHook: unsafe extern "system" fn(HKEY, u32, *mut u16, *mut u32, *mut u32, *mut u16, *mut u32, *mut i64) -> u32;
-    pub static RegEnumValueWHook: unsafe extern "system" fn(HKEY, u32, *mut u16, *mut u32, *mut u32, *mut u32, *mut u8, *mut u32) -> u32;
+    pub static RegQueryValueExWHook: unsafe extern "system" fn(HKEY, *const u16, *const u32, *mut u32, *mut u8, *mut u32) -> u32;
+    pub static RegEnumKeyExWHook: unsafe extern "system" fn(HKEY, u32, *mut u16, *mut u32, *const u32, *mut u16, *mut u32, *mut windows_sys::Win32::Foundation::FILETIME) -> u32;
+    pub static RegEnumValueWHook: unsafe extern "system" fn(HKEY, u32, *mut u16, *mut u32, *const u32, *mut u32, *mut u8, *mut u32) -> u32;
     pub static DeleteFileWHook: unsafe extern "system" fn(*const u16) -> BOOL;
     pub static CreateRemoteThreadHook: unsafe extern "system" fn(
         HANDLE, *const SECURITY_ATTRIBUTES, usize, LPTHREAD_START_ROUTINE, *const c_void, THREAD_CREATION_FLAGS, *mut u32
@@ -208,25 +208,20 @@ static_detour! {
     pub static MoveFileWHook: unsafe extern "system" fn(*const u16, *const u16) -> BOOL;
     pub static GetTempPathWHook: unsafe extern "system" fn(u32, *mut u16) -> u32;
     pub static GetTempFileNameWHook: unsafe extern "system" fn(*const u16, *const u16, u32, *mut u16) -> u32;
-    pub static FindFirstFileWHook: unsafe extern "system" fn(*const u16, *mut c_void) -> HANDLE;
-    pub static FindNextFileWHook: unsafe extern "system" fn(HANDLE, *mut c_void) -> BOOL;
+    pub static FindFirstFileWHook: unsafe extern "system" fn(*const u16, *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> HANDLE;
+    pub static FindNextFileWHook: unsafe extern "system" fn(HANDLE, *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> BOOL;
     pub static NtCreateThreadExHook: unsafe extern "system" fn(*mut HANDLE, u32, *const c_void, HANDLE, *const c_void, *const c_void, BOOL, usize, usize, usize, *const c_void) -> NTSTATUS;
     pub static QueueUserAPCHook: unsafe extern "system" fn(Option<unsafe extern "system" fn(usize)>, HANDLE, usize) -> u32;
-    pub static SetThreadContextHook: unsafe extern "system" fn(HANDLE, *const c_void) -> BOOL;
+    pub static SetThreadContextHook: unsafe extern "system" fn(HANDLE, *const windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> BOOL;
     pub static WinExecHook: unsafe extern "system" fn(*const u8, u32) -> u32;
     pub static SystemHook: unsafe extern "system" fn(*const i8) -> i32;
     pub static ShellExecuteWHook: unsafe extern "system" fn(HWND, *const u16, *const u16, *const u16, *const u16, i32) -> HINSTANCE;
     pub static ShellExecuteExWHook: unsafe extern "system" fn(*mut c_void) -> BOOL;
-    pub static CreateProcessAHook: unsafe extern "system" fn(*const u8, *mut u8, *const SECURITY_ATTRIBUTES, *const SECURITY_ATTRIBUTES, BOOL, u32, *const c_void, *const u8, *const c_void, *mut PROCESS_INFORMATION) -> BOOL;
+    pub static CreateProcessAHook: unsafe extern "system" fn(*const u8, *mut u8, *const SECURITY_ATTRIBUTES, *const SECURITY_ATTRIBUTES, BOOL, u32, *const c_void, *const u8, *const windows_sys::Win32::System::Threading::STARTUPINFOA, *mut PROCESS_INFORMATION) -> BOOL;
 }
 
 // Type definitions for function pointers and structs that might be missing or complex.
 type LPWSAOVERLAPPED_COMPLETION_ROUTINE = Option<unsafe extern "system" fn(u32, u32, *mut OVERLAPPED, u32)>;
-#[repr(C)]
-pub struct WSABUF {
-    pub len: u32,
-    pub buf: *mut u8,
-}
 
 pub fn hooked_is_debugger_present() -> BOOL {
     let should_log = {
@@ -485,11 +480,6 @@ pub unsafe fn hooked_create_file_w(
     h_template_file: HANDLE,
 ) -> HANDLE {
     if let Some(_guard) = ReentrancyGuard::new() {
-        let data_preview = if CONFIG.log_network_data {
-            format_buffer_preview(buf, len as u32)
-        } else {
-            "<disabled>".to_string()
-        };
         log_event(
             LogLevel::Info,
             LogEvent::ApiHook {
@@ -848,7 +838,7 @@ pub unsafe fn hooked_reg_open_key_ex_w(
 pub unsafe fn hooked_reg_query_value_ex_w(
     hkey: HKEY,
     lp_value_name: *const u16,
-    lp_reserved: *mut u32,
+    lp_reserved: *const u32,
     lp_type: *mut u32,
     lp_data: *mut u8,
     lpcb_data: *mut u32,
@@ -874,10 +864,10 @@ pub unsafe fn hooked_reg_enum_key_ex_w(
     dw_index: u32,
     lp_name: *mut u16,
     lpcch_name: *mut u32,
-    lp_reserved: *mut u32,
+    lp_reserved: *const u32,
     lp_class: *mut u16,
     lpcch_class: *mut u32,
-    lpft_last_write_time: *mut i64,
+    lpft_last_write_time: *mut windows_sys::Win32::Foundation::FILETIME,
 ) -> u32 {
     if let Some(_guard) = ReentrancyGuard::new() {
         log_event(
@@ -901,7 +891,7 @@ pub unsafe fn hooked_reg_enum_value_w(
     dw_index: u32,
     lp_value_name: *mut u16,
     lpcch_value_name: *mut u32,
-    lp_reserved: *mut u32,
+    lp_reserved: *const u32,
     lp_type: *mut u32,
     lp_data: *mut u8,
     lpcb_data: *mut u32,
@@ -1161,7 +1151,7 @@ pub unsafe fn hooked_wsasend(
             for buffer in buffers {
                 total_len += buffer.len;
             }
-            if CONFIG.log_network_data {
+            if CONFIG.features.get().map_or(false, |f| f.log_network_data) {
                 data_preview.clear();
                 for buffer in buffers {
                     if data_preview.len() < 256 { // Limit preview size
@@ -1190,6 +1180,11 @@ pub unsafe fn hooked_wsasend(
 
 pub unsafe fn hooked_send(s: SOCKET, buf: *const u8, len: i32, flags: i32) -> i32 {
     if let Some(_guard) = ReentrancyGuard::new() {
+        let data_preview = if CONFIG.features.get().map_or(false, |f| f.log_network_data) {
+            format_buffer_preview(buf, len as u32)
+        } else {
+            "<disabled>".to_string()
+        };
         log_event(
             LogLevel::Info,
             LogEvent::ApiHook {
@@ -1437,7 +1432,7 @@ pub unsafe fn hooked_get_temp_path_w(n_buffer_length: u32, lp_buffer: *mut u16) 
     GetTempPathWHook.call(n_buffer_length, lp_buffer)
 }
 
-pub unsafe fn hooked_find_first_file_w(lp_file_name: *const u16, lp_find_file_data: *mut c_void) -> HANDLE {
+pub unsafe fn hooked_find_first_file_w(lp_file_name: *const u16, lp_find_file_data: *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> HANDLE {
     if let Some(_guard) = ReentrancyGuard::new() {
         log_event(
             LogLevel::Info,
@@ -1496,7 +1491,7 @@ pub unsafe fn hooked_create_process_a(
     dw_creation_flags: u32,
     lp_environment: *const c_void,
     lp_current_directory: *const u8,
-    lp_startup_info: *const c_void, // Simplified for logging
+    lp_startup_info: *const windows_sys::Win32::System::Threading::STARTUPINFOA, // Simplified for logging
     lp_process_information: *mut PROCESS_INFORMATION,
 ) -> BOOL {
     if let Some(_guard) = ReentrancyGuard::new() {
@@ -1552,7 +1547,7 @@ pub unsafe fn hooked_get_temp_file_name_w(lp_path_name: *const u16, lp_prefix_st
     result
 }
 
-pub unsafe fn hooked_find_next_file_w(h_find_file: HANDLE, lp_find_file_data: *mut c_void) -> BOOL {
+pub unsafe fn hooked_find_next_file_w(h_find_file: HANDLE, lp_find_file_data: *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> BOOL {
     // This function is often called in a tight loop. To avoid log spam, we don't log it by default.
     // The initial FindFirstFileW call is usually sufficient to indicate enumeration.
     FindNextFileWHook.call(h_find_file, lp_find_file_data)
@@ -1589,7 +1584,7 @@ pub unsafe fn hooked_nt_create_thread_ex(
     NtCreateThreadExHook.call(ph_thread, desired_access, object_attributes, process_handle, start_routine, argument, create_suspended, stack_zero_bits, size_of_stack_commit, size_of_stack_reserve, bytes_buffer)
 }
 
-pub unsafe fn hooked_set_thread_context(h_thread: HANDLE, lp_context: *const c_void) -> BOOL {
+pub unsafe fn hooked_set_thread_context(h_thread: HANDLE, lp_context: *const windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> BOOL {
     SUSPICION_SCORE.fetch_add(15, Ordering::Relaxed);
     if let Some(_guard) = ReentrancyGuard::new() {
         log_event(
@@ -2021,38 +2016,38 @@ pub unsafe fn initialize_all_hooks() {
     hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
     hook!(LoadLibraryExWHook, LoadLibraryExW, hooked_load_library_ex_w);
 
-    if CONFIG.registry_hooks_enabled {
+    if CONFIG.features.get().map_or(false, |f| f.registry_hooks_enabled) {
         // Hook registry functions.
         hook!(
             RegCreateKeyExWHook,
             RegCreateKeyExW,
-            hooked_reg_create_key_ex_w
+            |a, b, c, d, e, f, g, h, i| hooked_reg_create_key_ex_w(a, b, c, d, e, f, g, h, i)
         );
         hook!(
             RegSetValueExWHook,
             RegSetValueExW,
-            hooked_reg_set_value_ex_w
+            |a, b, c, d, e, f| hooked_reg_set_value_ex_w(a, b, c, d, e, f)
         );
-        hook!(RegDeleteKeyWHook, RegDeleteKeyW, hooked_reg_delete_key_w);
-        hook!(RegOpenKeyExWHook, RegOpenKeyExW, hooked_reg_open_key_ex_w);
-        hook!(RegQueryValueExWHook, RegQueryValueExW, hooked_reg_query_value_ex_w);
-        hook!(RegEnumKeyExWHook, RegEnumKeyExW, hooked_reg_enum_key_ex_w);
-        hook!(RegEnumValueWHook, RegEnumValueW, hooked_reg_enum_value_w);
+        hook!(RegDeleteKeyWHook, RegDeleteKeyW, |a, b| hooked_reg_delete_key_w(a, b));
+        hook!(RegOpenKeyExWHook, RegOpenKeyExW, |a, b, c, d, e| hooked_reg_open_key_ex_w(a, b, c, d, e));
+        hook!(RegQueryValueExWHook, RegQueryValueExW, |a, b, c, d, e, f| hooked_reg_query_value_ex_w(a, b, c, d, e, f));
+        hook!(RegEnumKeyExWHook, RegEnumKeyExW, |a, b, c, d, e, f, g, h| hooked_reg_enum_key_ex_w(a, b, c, d, e, f, g, h));
+        hook!(RegEnumValueWHook, RegEnumValueW, |a, b, c, d, e, f, g, h| hooked_reg_enum_value_w(a, b, c, d, e, f, g, h));
     }
-    hook!(DeleteFileWHook, DeleteFileW, hooked_delete_file_w);
+    hook!(DeleteFileWHook, DeleteFileW, |a| hooked_delete_file_w(a));
 
     // Broader Feature Hooks
-    hook!(CopyFileWHook, CopyFileW, hooked_copy_file_w);
-    hook!(MoveFileWHook, MoveFileW, hooked_move_file_w);
-    hook!(GetTempPathWHook, GetTempPathW, hooked_get_temp_path_w);
-    hook!(GetTempFileNameWHook, GetTempFileNameW, hooked_get_temp_file_name_w);
-    hook!(FindFirstFileWHook, FindFirstFileW, hooked_find_first_file_w);
-    hook!(FindNextFileWHook, FindNextFileW, hooked_find_next_file_w);
-    hook!(QueueUserAPCHook, QueueUserAPC, hooked_queue_user_apc);
-    hook!(SetThreadContextHook, SetThreadContext, hooked_set_thread_context);
-    hook!(WinExecHook, WinExec, hooked_win_exec);
-    hook!(ShellExecuteWHook, ShellExecuteW, hooked_shell_execute_w);
-    hook!(CreateProcessAHook, CreateProcessA, hooked_create_process_a);
+    hook!(CopyFileWHook, CopyFileW, |a, b, c| hooked_copy_file_w(a, b, c));
+    hook!(MoveFileWHook, MoveFileW, |a, b| hooked_move_file_w(a, b));
+    hook!(GetTempPathWHook, GetTempPathW, |a, b| hooked_get_temp_path_w(a, b));
+    hook!(GetTempFileNameWHook, GetTempFileNameW, |a, b, c, d| hooked_get_temp_file_name_w(a, b, c, d));
+    hook!(FindFirstFileWHook, FindFirstFileW, |a, b| hooked_find_first_file_w(a, b));
+    hook!(FindNextFileWHook, FindNextFileW, |a, b| hooked_find_next_file_w(a, b));
+    hook!(QueueUserAPCHook, QueueUserAPC, |a, b, c| hooked_queue_user_apc(a, b, c));
+    hook!(SetThreadContextHook, SetThreadContext, |a, b| hooked_set_thread_context(a, b));
+    hook!(WinExecHook, WinExec, |a, b| hooked_win_exec(a, b));
+    hook!(ShellExecuteWHook, ShellExecuteW, |a, b, c, d, e, f| hooked_shell_execute_w(a, b, c, d, e, f));
+    hook!(CreateProcessAHook, CreateProcessA, |a, b, c, d, e, f, g, h, i, j| hooked_create_process_a(a, b, c, d, e, f, g, h, i, j));
 
     // Hook thread creation.
     hook!(
@@ -2121,28 +2116,28 @@ unsafe fn initialize_dynamic_hooks() {
     dyn_hook!(CryptEncryptHook, "advapi32.dll", b"CryptEncrypt\0", |a, b, c, d, e, f, g| hooked_crypt_encrypt(a, b, c, d, e, f, g));
     dyn_hook!(CryptDecryptHook, "advapi32.dll", b"CryptDecrypt\0", |a, b, c, d, e, f| hooked_crypt_decrypt(a, b, c, d, e, f));
 
-    if CONFIG.network_hooks_enabled {
+    if CONFIG.features.get().map_or(false, |f| f.network_hooks_enabled) {
         // C2 Detection Hooks
-        dyn_hook!(WSASendHook, "ws2_32.dll", b"WSASend\0", hooked_wsasend);
-        dyn_hook!(SendHook, "ws2_32.dll", b"send\0", hooked_send);
+        dyn_hook!(WSASendHook, "ws2_32.dll", b"WSASend\0", |a, b, c, d, e, f, g| hooked_wsasend(a, b, c, d, e, f, g));
+        dyn_hook!(SendHook, "ws2_32.dll", b"send\0", |a, b, c, d| hooked_send(a, b, c, d));
         // Note: WSARecv and recv are more complex to hook safely due to buffer management. Skipping for now.
 
-        dyn_hook!(InternetOpenWHook, "wininet.dll", b"InternetOpenW\0", hooked_internet_open_w);
-        dyn_hook!(InternetConnectWHook, "wininet.dll", b"InternetConnectW\0", hooked_internet_connect_w);
-        dyn_hook!(HttpOpenRequestWHook, "wininet.dll", b"HttpOpenRequestW\0", hooked_http_open_request_w);
-        dyn_hook!(InternetReadFileHook, "wininet.dll", b"InternetReadFile\0", hooked_internet_read_file);
+        dyn_hook!(InternetOpenWHook, "wininet.dll", b"InternetOpenW\0", |a, b, c, d, e| hooked_internet_open_w(a, b, c, d, e));
+        dyn_hook!(InternetConnectWHook, "wininet.dll", b"InternetConnectW\0", |a, b, c, d, e, f, g, h| hooked_internet_connect_w(a, b, c, d, e, f, g, h));
+        dyn_hook!(HttpOpenRequestWHook, "wininet.dll", b"HttpOpenRequestW\0", |a, b, c, d, e, f, g, h| hooked_http_open_request_w(a, b, c, d, e, f, g, h));
+        dyn_hook!(InternetReadFileHook, "wininet.dll", b"InternetReadFile\0", |a, b, c, d| hooked_internet_read_file(a, b, c, d));
 
-        dyn_hook!(DnsQuery_WHook, "dnsapi.dll", b"DnsQuery_W\0", hooked_dns_query_w);
-        dyn_hook!(DnsQuery_AHook, "dnsapi.dll", b"DnsQuery_A\0", hooked_dns_query_a);
+        dyn_hook!(DnsQuery_WHook, "dnsapi.dll", b"DnsQuery_W\0", |a, b, c, d, e, f| hooked_dns_query_w(a, b, c, d, e, f));
+        dyn_hook!(DnsQuery_AHook, "dnsapi.dll", b"DnsQuery_A\0", |a, b, c, d, e, f| hooked_dns_query_a(a, b, c, d, e, f));
     }
 
-    if CONFIG.crypto_hooks_enabled {
-        dyn_hook!(CertVerifyCertificateChainPolicyHook, "crypt32.dll", b"CertVerifyCertificateChainPolicy\0", hooked_cert_verify_certificate_chain_policy);
-        dyn_hook!(CryptHashDataHook, "advapi32.dll", b"CryptHashData\0", hooked_crypt_hash_data);
+    if CONFIG.features.get().map_or(false, |f| f.crypto_hooks_enabled) {
+        dyn_hook!(CertVerifyCertificateChainPolicyHook, "crypt32.dll", b"CertVerifyCertificateChainPolicy\0", |a, b, c, d| hooked_cert_verify_certificate_chain_policy(a, b, c, d));
+        dyn_hook!(CryptHashDataHook, "advapi32.dll", b"CryptHashData\0", |a, b, c, d| hooked_crypt_hash_data(a, b, c, d));
     }
 
-    dyn_hook!(NtCreateThreadExHook, "ntdll.dll", b"NtCreateThreadEx\0", hooked_nt_create_thread_ex);
-    dyn_hook!(SystemHook, "msvcrt.dll", b"system\0", hooked_system);
+    dyn_hook!(NtCreateThreadExHook, "ntdll.dll", b"NtCreateThreadEx\0", |a, b, c, d, e, f, g, h, i, j, k| hooked_nt_create_thread_ex(a, b, c, d, e, f, g, h, i, j, k));
+    dyn_hook!(SystemHook, "msvcrt.dll", b"system\0", |a| hooked_system(a));
     dyn_hook!(ShellExecuteExWHook, "shell32.dll", b"ShellExecuteExW\0", |a| hooked_shell_execute_ex_w(a));
 }
 
