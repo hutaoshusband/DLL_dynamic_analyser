@@ -7,7 +7,7 @@ use windows_sys::Win32::{
     Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX},
 };
 
-use crate::app::state::MonitorConfig;
+use shared::MonitorConfig;
 use widestring::U16CString;
 
 pub fn start_pipe_log_listener(pipe_handle: isize, logger: Sender<String>) {

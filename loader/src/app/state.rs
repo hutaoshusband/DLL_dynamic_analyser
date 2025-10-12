@@ -14,36 +14,7 @@ pub const DLL_NAME: &str = "monitor_lib.dll";
 
 // --- Data Structures ---
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub struct MonitorConfig {
-    pub api_hooks_enabled: bool,
-    pub iat_scan_enabled: bool,
-    pub string_dump_enabled: bool,
-    pub vmp_dump_enabled: bool,
-    pub manual_map_scan_enabled: bool,
-    pub network_hooks_enabled: bool,
-    pub registry_hooks_enabled: bool,
-    pub crypto_hooks_enabled: bool,
-    pub log_network_data: bool,
-    pub suspicion_threshold: u32,
-}
-
-impl Default for MonitorConfig {
-    fn default() -> Self {
-        Self {
-            api_hooks_enabled: true,
-            iat_scan_enabled: true,
-            string_dump_enabled: false,
-            vmp_dump_enabled: true,
-            manual_map_scan_enabled: true,
-            network_hooks_enabled: true,
-            registry_hooks_enabled: true,
-            crypto_hooks_enabled: true,
-            log_network_data: false,
-            suspicion_threshold: 10,
-        }
-    }
-}
+use shared::MonitorConfig;
 
 #[derive(serde::Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
@@ -155,6 +126,7 @@ impl PartialEq for LogEntry {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ModuleInfo {
     pub name: String,
     pub base_address: usize,
@@ -182,12 +154,14 @@ pub struct AppState {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct AppWindows {
     pub log_window_open: bool,
     pub memory_analysis_window_open: bool,
     pub entropy_viewer_window_open: bool,
     pub hooking_control_window_open: bool,
     pub network_activity_window_open: bool,
+    pub launcher_window_open: bool,
 }
 
 impl AppState {

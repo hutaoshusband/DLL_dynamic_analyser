@@ -30,35 +30,7 @@ impl FromStr for LogLevel {
     }
 }
 
-/// Configuration sent from the GUI to the DLL to control what features are enabled.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub struct MonitorConfig {
-    pub api_hooks_enabled: bool,
-    pub iat_scan_enabled: bool,
-    pub string_dump_enabled: bool,
-    pub vmp_dump_enabled: bool,
-    pub manual_map_scan_enabled: bool,
-    pub network_hooks_enabled: bool,
-    pub crypto_hooks_enabled: bool,
-    pub registry_hooks_enabled: bool,
-    pub log_network_data: bool,
-}
-
-impl Default for MonitorConfig {
-    fn default() -> Self {
-        Self {
-            api_hooks_enabled: true,
-            iat_scan_enabled: true,
-            string_dump_enabled: false,
-            vmp_dump_enabled: true,
-            manual_map_scan_enabled: true,
-            network_hooks_enabled: true,
-            crypto_hooks_enabled: true,
-            registry_hooks_enabled: true,
-            log_network_data: false,
-        }
-    }
-}
+use shared::MonitorConfig;
 
 #[derive(Debug)]
 pub struct Config {

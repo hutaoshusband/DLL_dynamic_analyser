@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "loader",
-    "client",
+    "client", "shared",
 ]
 
 # Centralize shared dependency versions here

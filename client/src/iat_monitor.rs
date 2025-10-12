@@ -11,8 +11,6 @@ use windows_sys::Win32::System::SystemServices::{
 use windows_sys::Win32::System::Memory::{
     VirtualQuery, MEMORY_BASIC_INFORMATION
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::Foundation::CloseHandle;
 
 /// Scans the IAT of a given module for potential hooks.

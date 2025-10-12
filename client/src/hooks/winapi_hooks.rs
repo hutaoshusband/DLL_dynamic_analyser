@@ -20,10 +20,6 @@ use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND};
 use windows_sys::Win32::Networking::WinSock::{
     inet_ntoa, ADDRINFOW, AF_INET, IN_ADDR, SOCKADDR, SOCKADDR_IN, SOCKET, WSABUF,
 };
-use windows_sys::Win32::Networking::WinInet::{
-    InternetOpenW, InternetConnectW, HttpOpenRequestW, InternetReadFile
-};
-use windows_sys::Win32::Security::Cryptography::{CertVerifyCertificateChainPolicy, CryptHashData, HCRYPTPROV_OR_NCRYPT_KEY_HANDLE};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DeleteFileW, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE, CopyFileW, MoveFileW, GetTempPathW, GetTempFileNameW, FindFirstFileW, FindNextFileW,
@@ -31,7 +27,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Threading::{
     CreateProcessA, QueueUserAPC, WinExec,
 };
-use windows_sys::Win32::UI::Shell::{ShellExecuteExW, ShellExecuteW};
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, CheckRemoteDebuggerPresent, IsDebuggerPresent,
     PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory, OutputDebugStringA, SetThreadContext,
@@ -1916,7 +1912,6 @@ pub unsafe fn hooked_crypt_decrypt(
     result
 }
 
-use crate::debug_log;
 
 macro_rules! hook {
     ($hook:ident, $func:expr, $hook_fn:expr) => {
@@ -1935,141 +1930,226 @@ macro_rules! hook {
 }
 
 pub unsafe fn initialize_all_hooks() {
-    // Hook critical process termination functions.
-    let exit_process_ptr: unsafe extern "system" fn(u32) -> ! =
-        std::mem::transmute(ExitProcess as *const ());
-    hook!(ExitProcessHook, exit_process_ptr, hooked_exit_process);
+    let config = CONFIG.features.get().unwrap();
 
-    let terminate_process_ptr: unsafe extern "system" fn(HANDLE, u32) -> BOOL =
-        std::mem::transmute(TerminateProcess as *const ());
-    hook!(
-        TerminateProcessHook,
-        terminate_process_ptr,
-        hooked_terminate_process
-    );
+    // Hook critical process termination functions.
+    if config.hook_exit_process {
+        let exit_process_ptr: unsafe extern "system" fn(u32) -> ! =
+            std::mem::transmute(ExitProcess as *const ());
+        hook!(ExitProcessHook, exit_process_ptr, hooked_exit_process);
+    }
+    if config.hook_terminate_process {
+        let terminate_process_ptr: unsafe extern "system" fn(HANDLE, u32) -> BOOL =
+            std::mem::transmute(TerminateProcess as *const ());
+        hook!(
+            TerminateProcessHook,
+            terminate_process_ptr,
+            hooked_terminate_process
+        );
+    }
 
     // Anti-debugging hooks
-    hook!(
-        IsDebuggerPresentHook,
-        IsDebuggerPresent,
-        hooked_is_debugger_present
-    );
-    hook!(
-        CheckRemoteDebuggerPresentHook,
-        CheckRemoteDebuggerPresent,
-        |a, b| hooked_check_remote_debugger_present(a, b)
-    );
-    hook!(GetTickCountHook, GetTickCount, hooked_get_tick_count);
-    hook!(
-        QueryPerformanceCounterHook,
-        QueryPerformanceCounter,
-        |a| hooked_query_performance_counter(a)
-    );
-    hook!(
-        OutputDebugStringAHook,
-        OutputDebugStringA,
-        |a| hooked_output_debug_string_a(a)
-    );
+    if config.hook_is_debugger_present {
+        hook!(
+            IsDebuggerPresentHook,
+            IsDebuggerPresent,
+            hooked_is_debugger_present
+        );
+    }
+    if config.hook_check_remote_debugger_present {
+        hook!(
+            CheckRemoteDebuggerPresentHook,
+            CheckRemoteDebuggerPresent,
+            |a, b| hooked_check_remote_debugger_present(a, b)
+        );
+    }
+    if config.hook_get_tick_count {
+        hook!(GetTickCountHook, GetTickCount, hooked_get_tick_count);
+    }
+    if config.hook_query_performance_counter {
+        hook!(
+            QueryPerformanceCounterHook,
+            QueryPerformanceCounter,
+            |a| hooked_query_performance_counter(a)
+        );
+    }
+    if config.hook_output_debug_string_a {
+        hook!(
+            OutputDebugStringAHook,
+            OutputDebugStringA,
+            |a| hooked_output_debug_string_a(a)
+        );
+    }
 
     // Process enumeration hooks
-    hook!(
-        CreateToolhelp32SnapshotHook,
-        CreateToolhelp32Snapshot,
-        |a, b| hooked_create_toolhelp32_snapshot(a, b)
-    );
-    hook!(
-        Process32FirstWHook,
-        Process32FirstW,
-        |a, b| hooked_process32_first_w(a, b)
-    );
-    hook!(
-        Process32NextWHook,
-        Process32NextW,
-        |a, b| hooked_process32_next_w(a, b)
-    );
+    if config.hook_create_toolhelp32_snapshot {
+        hook!(
+            CreateToolhelp32SnapshotHook,
+            CreateToolhelp32Snapshot,
+            |a, b| hooked_create_toolhelp32_snapshot(a, b)
+        );
+    }
+    if config.hook_process32_first_w {
+        hook!(
+            Process32FirstWHook,
+            Process32FirstW,
+            |a, b| hooked_process32_first_w(a, b)
+        );
+    }
+    if config.hook_process32_next_w {
+        hook!(
+            Process32NextWHook,
+            Process32NextW,
+            |a, b| hooked_process32_next_w(a, b)
+        );
+    }
 
-    hook!(CreateFileWHook, CreateFileW, |a, b, c, d, e, f, g| {
-        hooked_create_file_w(a, b, c, d, e, f, g)
-    });
-    hook!(WriteFileHook, WriteFile, |a, b, c, d, e| {
-        hooked_write_file(a, b, c, d, e)
-    });
-    hook!(CreateProcessWHook, CreateProcessW, hooked_create_process_w);
-    hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
+    if config.hook_create_file_w {
+        hook!(CreateFileWHook, CreateFileW, |a, b, c, d, e, f, g| {
+            hooked_create_file_w(a, b, c, d, e, f, g)
+        });
+    }
+    if config.hook_write_file {
+        hook!(WriteFileHook, WriteFile, |a, b, c, d, e| {
+            hooked_write_file(a, b, c, d, e)
+        });
+    }
+    if config.hook_create_process_w {
+        hook!(CreateProcessWHook, CreateProcessW, hooked_create_process_w);
+    }
+    if config.hook_message_box_w {
+        hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
+    }
 
     // Hook process interaction functions
-    hook!(OpenProcessHook, OpenProcess, |a, b, c| {
-        hooked_open_process(a, b, c)
-    });
-    hook!(
-        WriteProcessMemoryHook,
-        WriteProcessMemory,
-        |a, b, c, d, e| hooked_write_process_memory(a, b, c, d, e)
-    );
-    hook!(
-        VirtualAllocExHook,
-        VirtualAllocEx,
-        |a, b, c, d, e| hooked_virtual_alloc_ex(a, b, c, d, e)
-    );
+    if config.hook_open_process {
+        hook!(OpenProcessHook, OpenProcess, |a, b, c| {
+            hooked_open_process(a, b, c)
+        });
+    }
+    if config.hook_write_process_memory {
+        hook!(
+            WriteProcessMemoryHook,
+            WriteProcessMemory,
+            |a, b, c, d, e| hooked_write_process_memory(a, b, c, d, e)
+        );
+    }
+    if config.hook_virtual_alloc_ex {
+        hook!(
+            VirtualAllocExHook,
+            VirtualAllocEx,
+            |a, b, c, d, e| hooked_virtual_alloc_ex(a, b, c, d, e)
+        );
+    }
 
     // Hook library loading functions.
-    hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
-    hook!(LoadLibraryExWHook, LoadLibraryExW, hooked_load_library_ex_w);
-
-    if CONFIG.features.get().map_or(false, |f| f.registry_hooks_enabled) {
-        // Hook registry functions.
-        hook!(
-            RegCreateKeyExWHook,
-            RegCreateKeyExW,
-            |a, b, c, d, e, f, g, h, i| hooked_reg_create_key_ex_w(a, b, c, d, e, f, g, h, i)
-        );
-        hook!(
-            RegSetValueExWHook,
-            RegSetValueExW,
-            |a, b, c, d, e, f| hooked_reg_set_value_ex_w(a, b, c, d, e, f)
-        );
-        hook!(RegDeleteKeyWHook, RegDeleteKeyW, |a, b| hooked_reg_delete_key_w(a, b));
-        hook!(RegOpenKeyExWHook, RegOpenKeyExW, |a, b, c, d, e| hooked_reg_open_key_ex_w(a, b, c, d, e));
-        hook!(RegQueryValueExWHook, RegQueryValueExW, |a, b, c, d, e, f| hooked_reg_query_value_ex_w(a, b, c, d, e, f));
-        hook!(RegEnumKeyExWHook, RegEnumKeyExW, |a, b, c, d, e, f, g, h| hooked_reg_enum_key_ex_w(a, b, c, d, e, f, g, h));
-        hook!(RegEnumValueWHook, RegEnumValueW, |a, b, c, d, e, f, g, h| hooked_reg_enum_value_w(a, b, c, d, e, f, g, h));
+    if config.hook_load_library_w {
+        hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
     }
-    hook!(DeleteFileWHook, DeleteFileW, |a| hooked_delete_file_w(a));
+    if config.hook_load_library_ex_w {
+        hook!(LoadLibraryExWHook, LoadLibraryExW, hooked_load_library_ex_w);
+    }
+
+    if config.registry_hooks_enabled {
+        // Hook registry functions.
+        if config.hook_reg_create_key_ex_w {
+            hook!(
+                RegCreateKeyExWHook,
+                RegCreateKeyExW,
+                |a, b, c, d, e, f, g, h, i| hooked_reg_create_key_ex_w(a, b, c, d, e, f, g, h, i)
+            );
+        }
+        if config.hook_reg_set_value_ex_w {
+            hook!(
+                RegSetValueExWHook,
+                RegSetValueExW,
+                |a, b, c, d, e, f| hooked_reg_set_value_ex_w(a, b, c, d, e, f)
+            );
+        }
+        if config.hook_reg_delete_key_w {
+            hook!(RegDeleteKeyWHook, RegDeleteKeyW, |a, b| hooked_reg_delete_key_w(a, b));
+        }
+        if config.hook_reg_open_key_ex_w {
+            hook!(RegOpenKeyExWHook, RegOpenKeyExW, |a, b, c, d, e| hooked_reg_open_key_ex_w(a, b, c, d, e));
+        }
+        if config.hook_reg_query_value_ex_w {
+            hook!(RegQueryValueExWHook, RegQueryValueExW, |a, b, c, d, e, f| hooked_reg_query_value_ex_w(a, b, c, d, e, f));
+        }
+        if config.hook_reg_enum_key_ex_w {
+            hook!(RegEnumKeyExWHook, RegEnumKeyExW, |a, b, c, d, e, f, g, h| hooked_reg_enum_key_ex_w(a, b, c, d, e, f, g, h));
+        }
+        if config.hook_reg_enum_value_w {
+            hook!(RegEnumValueWHook, RegEnumValueW, |a, b, c, d, e, f, g, h| hooked_reg_enum_value_w(a, b, c, d, e, f, g, h));
+        }
+    }
+    if config.hook_delete_file_w {
+        hook!(DeleteFileWHook, DeleteFileW, |a| hooked_delete_file_w(a));
+    }
 
     // Broader Feature Hooks
-    hook!(CopyFileWHook, CopyFileW, |a, b, c| hooked_copy_file_w(a, b, c));
-    hook!(MoveFileWHook, MoveFileW, |a, b| hooked_move_file_w(a, b));
-    hook!(GetTempPathWHook, GetTempPathW, |a, b| hooked_get_temp_path_w(a, b));
-    hook!(GetTempFileNameWHook, GetTempFileNameW, |a, b, c, d| hooked_get_temp_file_name_w(a, b, c, d));
-    hook!(FindFirstFileWHook, FindFirstFileW, |a, b| hooked_find_first_file_w(a, b));
-    hook!(FindNextFileWHook, FindNextFileW, |a, b| hooked_find_next_file_w(a, b));
-    hook!(QueueUserAPCHook, QueueUserAPC, |a, b, c| hooked_queue_user_apc(a, b, c));
-    hook!(SetThreadContextHook, SetThreadContext, |a, b| hooked_set_thread_context(a, b));
-    hook!(WinExecHook, WinExec, |a, b| hooked_win_exec(a, b));
-    hook!(ShellExecuteWHook, ShellExecuteW, |a, b, c, d, e, f| hooked_shell_execute_w(a, b, c, d, e, f));
-    hook!(CreateProcessAHook, CreateProcessA, |a, b, c, d, e, f, g, h, i, j| hooked_create_process_a(a, b, c, d, e, f, g, h, i, j));
+    if config.hook_copy_file_w {
+        hook!(CopyFileWHook, CopyFileW, |a, b, c| hooked_copy_file_w(a, b, c));
+    }
+    if config.hook_move_file_w {
+        hook!(MoveFileWHook, MoveFileW, |a, b| hooked_move_file_w(a, b));
+    }
+    if config.hook_get_temp_path_w {
+        hook!(GetTempPathWHook, GetTempPathW, |a, b| hooked_get_temp_path_w(a, b));
+    }
+    if config.hook_get_temp_file_name_w {
+        hook!(GetTempFileNameWHook, GetTempFileNameW, |a, b, c, d| hooked_get_temp_file_name_w(a, b, c, d));
+    }
+    if config.hook_find_first_file_w {
+        hook!(FindFirstFileWHook, FindFirstFileW, |a, b| hooked_find_first_file_w(a, b));
+    }
+    if config.hook_find_next_file_w {
+        hook!(FindNextFileWHook, FindNextFileW, |a, b| hooked_find_next_file_w(a, b));
+    }
+    if config.hook_queue_user_apc {
+        hook!(QueueUserAPCHook, QueueUserAPC, |a, b, c| hooked_queue_user_apc(a, b, c));
+    }
+    if config.hook_set_thread_context {
+        hook!(SetThreadContextHook, SetThreadContext, |a, b| hooked_set_thread_context(a, b));
+    }
+    if config.hook_win_exec {
+        hook!(WinExecHook, WinExec, |a, b| hooked_win_exec(a, b));
+    }
+    if config.hook_shell_execute_w {
+        hook!(ShellExecuteWHook, ShellExecuteW, |a, b, c, d, e, f| hooked_shell_execute_w(a, b, c, d, e, f));
+    }
+    if config.hook_create_process_a {
+        hook!(CreateProcessAHook, CreateProcessA, |a, b, c, d, e, f, g, h, i, j| hooked_create_process_a(a, b, c, d, e, f, g, h, i, j));
+    }
 
     // Hook thread creation.
-    hook!(
-        CreateRemoteThreadHook,
-        CreateRemoteThread,
-        hooked_create_remote_thread
-    );
-    hook!(CreateThreadHook, CreateThread, |a, b, c, d, e, f| {
-        hooked_create_thread(a, b, c, d, e, f)
-    });
+    if config.hook_create_remote_thread {
+        hook!(
+            CreateRemoteThreadHook,
+            CreateRemoteThread,
+            hooked_create_remote_thread
+        );
+    }
+    if config.hook_create_thread {
+        hook!(CreateThreadHook, CreateThread, |a, b, c, d, e, f| {
+            hooked_create_thread(a, b, c, d, e, f)
+        });
+    }
 
     // Hook exception handling
-    hook!(
-        AddVectoredExceptionHandlerHook,
-        AddVectoredExceptionHandler,
-        |a, b| hooked_add_vectored_exception_handler(a, b)
-    );
+    if config.hook_add_vectored_exception_handler {
+        hook!(
+            AddVectoredExceptionHandlerHook,
+            AddVectoredExceptionHandler,
+            |a, b| hooked_add_vectored_exception_handler(a, b)
+        );
+    }
 
     initialize_dynamic_hooks();
 }
 
 unsafe fn initialize_dynamic_hooks() {
+    let config = CONFIG.features.get().unwrap();
+
     macro_rules! dyn_hook {
         ($hook:ident, $lib:expr, $func:expr, $hook_fn:expr) => {
             let lib_name_str = $lib;
@@ -2103,42 +2183,86 @@ unsafe fn initialize_dynamic_hooks() {
         };
     }
 
-    dyn_hook!(ConnectHook, "ws2_32.dll", b"connect\0", hooked_connect);
-    dyn_hook!(GetAddrInfoWHook, "ws2_32.dll", b"GetAddrInfoW\0", hooked_get_addr_info_w);
+    if config.hook_connect {
+        dyn_hook!(ConnectHook, "ws2_32.dll", b"connect\0", hooked_connect);
+    }
+    if config.hook_get_addr_info_w {
+        dyn_hook!(GetAddrInfoWHook, "ws2_32.dll", b"GetAddrInfoW\0", hooked_get_addr_info_w);
+    }
 
-    dyn_hook!(NtTerminateProcessHook, "ntdll.dll", b"NtTerminateProcess\0", hooked_nt_terminate_process);
-    dyn_hook!(NtQueryInformationProcessHook, "ntdll.dll", b"NtQueryInformationProcess\0", |a, b, c, d, e| hooked_nt_query_information_process(a, b, c, d, e));
+    if config.hook_nt_terminate_process {
+        dyn_hook!(NtTerminateProcessHook, "ntdll.dll", b"NtTerminateProcess\0", hooked_nt_terminate_process);
+    }
+    if config.hook_nt_query_information_process {
+        dyn_hook!(NtQueryInformationProcessHook, "ntdll.dll", b"NtQueryInformationProcess\0", |a, b, c, d, e| hooked_nt_query_information_process(a, b, c, d, e));
+    }
 
-    dyn_hook!(HttpSendRequestWHook, "wininet.dll", b"HttpSendRequestW\0", hooked_http_send_request_w);
+    if config.hook_http_send_request_w {
+        dyn_hook!(HttpSendRequestWHook, "wininet.dll", b"HttpSendRequestW\0", hooked_http_send_request_w);
+    }
 
-    dyn_hook!(FreeLibraryHook, "kernel32.dll", b"FreeLibrary\0", |a| hooked_free_library(a));
+    if config.hook_free_library {
+        dyn_hook!(FreeLibraryHook, "kernel32.dll", b"FreeLibrary\0", |a| hooked_free_library(a));
+    }
 
-    dyn_hook!(CryptEncryptHook, "advapi32.dll", b"CryptEncrypt\0", |a, b, c, d, e, f, g| hooked_crypt_encrypt(a, b, c, d, e, f, g));
-    dyn_hook!(CryptDecryptHook, "advapi32.dll", b"CryptDecrypt\0", |a, b, c, d, e, f| hooked_crypt_decrypt(a, b, c, d, e, f));
+    if config.crypto_hooks_enabled {
+        if config.hook_crypt_encrypt {
+            dyn_hook!(CryptEncryptHook, "advapi32.dll", b"CryptEncrypt\0", |a, b, c, d, e, f, g| hooked_crypt_encrypt(a, b, c, d, e, f, g));
+        }
+        if config.hook_crypt_decrypt {
+            dyn_hook!(CryptDecryptHook, "advapi32.dll", b"CryptDecrypt\0", |a, b, c, d, e, f| hooked_crypt_decrypt(a, b, c, d, e, f));
+        }
+    }
 
-    if CONFIG.features.get().map_or(false, |f| f.network_hooks_enabled) {
+    if config.network_hooks_enabled {
         // C2 Detection Hooks
-        dyn_hook!(WSASendHook, "ws2_32.dll", b"WSASend\0", |a, b, c, d, e, f, g| hooked_wsasend(a, b, c, d, e, f, g));
-        dyn_hook!(SendHook, "ws2_32.dll", b"send\0", |a, b, c, d| hooked_send(a, b, c, d));
+        if config.hook_wsasend {
+            dyn_hook!(WSASendHook, "ws2_32.dll", b"WSASend\0", |a, b, c, d, e, f, g| hooked_wsasend(a, b, c, d, e, f, g));
+        }
+        if config.hook_send {
+            dyn_hook!(SendHook, "ws2_32.dll", b"send\0", |a, b, c, d| hooked_send(a, b, c, d));
+        }
         // Note: WSARecv and recv are more complex to hook safely due to buffer management. Skipping for now.
 
-        dyn_hook!(InternetOpenWHook, "wininet.dll", b"InternetOpenW\0", |a, b, c, d, e| hooked_internet_open_w(a, b, c, d, e));
-        dyn_hook!(InternetConnectWHook, "wininet.dll", b"InternetConnectW\0", |a, b, c, d, e, f, g, h| hooked_internet_connect_w(a, b, c, d, e, f, g, h));
-        dyn_hook!(HttpOpenRequestWHook, "wininet.dll", b"HttpOpenRequestW\0", |a, b, c, d, e, f, g, h| hooked_http_open_request_w(a, b, c, d, e, f, g, h));
-        dyn_hook!(InternetReadFileHook, "wininet.dll", b"InternetReadFile\0", |a, b, c, d| hooked_internet_read_file(a, b, c, d));
+        if config.hook_internet_open_w {
+            dyn_hook!(InternetOpenWHook, "wininet.dll", b"InternetOpenW\0", |a, b, c, d, e| hooked_internet_open_w(a, b, c, d, e));
+        }
+        if config.hook_internet_connect_w {
+            dyn_hook!(InternetConnectWHook, "wininet.dll", b"InternetConnectW\0", |a, b, c, d, e, f, g, h| hooked_internet_connect_w(a, b, c, d, e, f, g, h));
+        }
+        if config.hook_http_open_request_w {
+            dyn_hook!(HttpOpenRequestWHook, "wininet.dll", b"HttpOpenRequestW\0", |a, b, c, d, e, f, g, h| hooked_http_open_request_w(a, b, c, d, e, f, g, h));
+        }
+        if config.hook_internet_read_file {
+            dyn_hook!(InternetReadFileHook, "wininet.dll", b"InternetReadFile\0", |a, b, c, d| hooked_internet_read_file(a, b, c, d));
+        }
 
-        dyn_hook!(DnsQuery_WHook, "dnsapi.dll", b"DnsQuery_W\0", |a, b, c, d, e, f| hooked_dns_query_w(a, b, c, d, e, f));
-        dyn_hook!(DnsQuery_AHook, "dnsapi.dll", b"DnsQuery_A\0", |a, b, c, d, e, f| hooked_dns_query_a(a, b, c, d, e, f));
+        if config.hook_dns_query_w {
+            dyn_hook!(DnsQuery_WHook, "dnsapi.dll", b"DnsQuery_W\0", |a, b, c, d, e, f| hooked_dns_query_w(a, b, c, d, e, f));
+        }
+        if config.hook_dns_query_a {
+            dyn_hook!(DnsQuery_AHook, "dnsapi.dll", b"DnsQuery_A\0", |a, b, c, d, e, f| hooked_dns_query_a(a, b, c, d, e, f));
+        }
     }
 
-    if CONFIG.features.get().map_or(false, |f| f.crypto_hooks_enabled) {
-        dyn_hook!(CertVerifyCertificateChainPolicyHook, "crypt32.dll", b"CertVerifyCertificateChainPolicy\0", |a, b, c, d| hooked_cert_verify_certificate_chain_policy(a, b, c, d));
-        dyn_hook!(CryptHashDataHook, "advapi32.dll", b"CryptHashData\0", |a, b, c, d| hooked_crypt_hash_data(a, b, c, d));
+    if config.crypto_hooks_enabled {
+        if config.hook_cert_verify_certificate_chain_policy {
+            dyn_hook!(CertVerifyCertificateChainPolicyHook, "crypt32.dll", b"CertVerifyCertificateChainPolicy\0", |a, b, c, d| hooked_cert_verify_certificate_chain_policy(a, b, c, d));
+        }
+        if config.hook_crypt_hash_data {
+            dyn_hook!(CryptHashDataHook, "advapi32.dll", b"CryptHashData\0", |a, b, c, d| hooked_crypt_hash_data(a, b, c, d));
+        }
     }
 
-    dyn_hook!(NtCreateThreadExHook, "ntdll.dll", b"NtCreateThreadEx\0", |a, b, c, d, e, f, g, h, i, j, k| hooked_nt_create_thread_ex(a, b, c, d, e, f, g, h, i, j, k));
-    dyn_hook!(SystemHook, "msvcrt.dll", b"system\0", |a| hooked_system(a));
-    dyn_hook!(ShellExecuteExWHook, "shell32.dll", b"ShellExecuteExW\0", |a| hooked_shell_execute_ex_w(a));
+    if config.hook_nt_create_thread_ex {
+        dyn_hook!(NtCreateThreadExHook, "ntdll.dll", b"NtCreateThreadEx\0", |a, b, c, d, e, f, g, h, i, j, k| hooked_nt_create_thread_ex(a, b, c, d, e, f, g, h, i, j, k));
+    }
+    if config.hook_system {
+        dyn_hook!(SystemHook, "msvcrt.dll", b"system\0", |a| hooked_system(a));
+    }
+    if config.hook_shell_execute_ex_w {
+        dyn_hook!(ShellExecuteExWHook, "shell32.dll", b"ShellExecuteExW\0", |a| hooked_shell_execute_ex_w(a));
+    }
 }
 
 pub unsafe fn hooked_shell_execute_ex_w(p_shellexecuteinfo: *mut c_void) -> BOOL {

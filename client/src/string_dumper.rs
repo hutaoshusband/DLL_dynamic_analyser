@@ -108,6 +108,8 @@ fn string_dumper_main(found_strings: Arc<Mutex<HashSet<String>>>) {
     }
 }
 
+
+
 /// Spawns the string dumper thread.
 pub fn start_string_dumper() {
     log_event(LogLevel::Info, LogEvent::MemoryScan {
