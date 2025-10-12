@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "cs2_creator",
-    "monitor_lib",
+    "loader",
+    "client",
 ]
 
 # Centralize shared dependency versions here

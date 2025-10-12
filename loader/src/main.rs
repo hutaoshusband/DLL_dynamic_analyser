@@ -75,6 +75,14 @@ pub enum LogLevel {
 }
 
 #[derive(serde::Serialize, Deserialize, Debug, Clone)]
+pub struct SectionInfo {
+    pub name: String,
+    pub virtual_address: usize,
+    pub virtual_size: usize,
+    pub characteristics: u32,
+}
+
+#[derive(serde::Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "event_type", content = "details")]
 pub enum LogEvent {
     Initialization { status: String },
@@ -86,6 +94,17 @@ pub enum LogEvent {
     Error { source: String, message: String },
     FileOperation { path: String, operation: String, details: String },
     VmpSectionFound { module_path: String, section_name: String },
+    SectionList { sections: Vec<SectionInfo> },
+    SectionDump { name: String, data: Vec<u8> },
+    EntropyResult { name: String, entropy: Vec<f32> },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "command", content = "payload")]
+pub enum Command {
+    ListSections,
+    DumpSection { name: String },
+    CalculateEntropy { name: String },
 }
 
 impl PartialEq for LogEvent {
@@ -145,6 +164,9 @@ struct MyApp {
     injection_status: Arc<Mutex<String>>,
     modules: Arc<Mutex<Vec<ModuleInfo>>>,
     selected_module_index: Option<usize>,
+    sections: Arc<Mutex<Vec<SectionInfo>>>,
+    selected_section_name: Option<String>,
+    entropy_results: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
     monitor_config: MonitorConfig,
 }
 
@@ -167,6 +189,9 @@ impl MyApp {
             injection_status: Arc::new(Mutex::new("Not Injected".to_string())),
             modules: Arc::new(Mutex::new(Vec::new())),
             selected_module_index: None,
+            sections: Arc::new(Mutex::new(Vec::new())),
+            selected_section_name: None,
+            entropy_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
             monitor_config: MonitorConfig::default(),
         }
     }
@@ -176,6 +201,23 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(log_json) = self.log_receiver.try_recv() {
             if let Ok(new_log) = serde_json::from_str::<LogEntry>(&log_json) {
+                match &new_log.event {
+                    LogEvent::SectionList { sections } => {
+                        *self.sections.lock().unwrap() = sections.clone();
+                    }
+                    LogEvent::SectionDump { name, data } => {
+                        if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
+                            if let Err(e) = std::fs::write(&path, data) {
+                                // Log error to GUI
+                            }
+                        }
+                    }
+                    LogEvent::EntropyResult { name, entropy } => {
+                        self.entropy_results.lock().unwrap().insert(name.clone(), entropy.clone());
+                    }
+                    _ => {}
+                }
+
                 if let Some((last_log, count)) = self.logs.last_mut() {
                     if *last_log == new_log { *count += 1; } else { self.logs.push((new_log, 1)); }
                 } else {
@@ -271,6 +313,75 @@ impl eframe::App for MyApp {
             });
 
             ui.separator();
+
+            ui.collapsing("Memory Sections", |ui| {
+                if ui.button("Refresh Sections").clicked() {
+                    if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
+                        let command = Command::ListSections;
+                        if let Ok(command_json) = serde_json::to_string(&command) {
+                            unsafe {
+                                WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
+                            }
+                        }
+                    }
+                }
+
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    let sections = self.sections.lock().unwrap().clone();
+                    for section in sections.iter() {
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(self.selected_section_name == Some(section.name.clone()), &section.name).clicked() {
+                                self.selected_section_name = Some(section.name.clone());
+                            }
+                            ui.label(format!(
+                                "Address: {:#X}, Size: {} bytes",
+                                section.virtual_address, section.virtual_size
+                            ));
+                            if ui.button("Dump").clicked() {
+                                if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
+                                    let command = Command::DumpSection { name: section.name.clone() };
+                                    if let Ok(command_json) = serde_json::to_string(&command) {
+                                        unsafe {
+                                            WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
+                                        }
+                                    }
+                                }
+                            }
+                            if ui.button("Entropy Scan").clicked() {
+                                if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
+                                    let command = Command::CalculateEntropy { name: section.name.clone() };
+                                    if let Ok(command_json) = serde_json::to_string(&command) {
+                                        unsafe {
+                                            WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+
+            ui.separator();
+
+            ui.collapsing("Entropy Viewer", |ui| {
+                if let Some(selected_section_name) = &self.selected_section_name {
+                    let entropy_results = self.entropy_results.lock().unwrap();
+                    if let Some(entropy) = entropy_results.get(selected_section_name) {
+                        let points: egui_plot::PlotPoints = entropy.iter().enumerate().map(|(i, &y)| [i as f64, y as f64]).collect();
+                        let line = egui_plot::Line::new(points);
+                        egui_plot::Plot::new("entropy_plot")
+                            .view_aspect(2.0)
+                            .show(ui, |plot_ui| plot_ui.line(line));
+                    } else {
+                        ui.label("No entropy data for the selected section. Perform an entropy scan first.");
+                    }
+                } else {
+                    ui.label("Select a section to view its entropy.");
+                }
+            });
+
+            ui.separator();
             ui.label(format!("Status: {}", *self.injection_status.lock().unwrap()));
             egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
                 for (log, count) in &self.logs {
@@ -304,6 +415,9 @@ fn format_log_event(event: &LogEvent) -> String {
         LogEvent::Error { source, message } => format!("ERROR [{}]: {}", source, message),
         LogEvent::FileOperation { path, operation, details } => format!("File Op: {} on {} | Details: {}", operation, path, details),
         LogEvent::VmpSectionFound { module_path, section_name } => format!("VMP Section: {} in {}", section_name, module_path),
+        LogEvent::SectionList { sections } => format!("Received section list with {} entries.", sections.len()),
+        LogEvent::SectionDump { name, data } => format!("Dumped section '{}' ({} bytes).", name, data.len()),
+        LogEvent::EntropyResult { name, .. } => format!("Calculated entropy for section '{}'.", name),
     }
 }
 
@@ -641,5 +755,8 @@ fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default().with_inner_size([700.0, 900.0]),
         ..Default::default()
     };
-    eframe::run_native("DLL Dynamic Analyzer", options, Box::new(|cc| Box::new(MyApp::new(cc))))
+    eframe::run_native("DLL Dynamic Analyzer", options, Box::new(|cc| {
+        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        Box::new(MyApp::new(cc))
+    }))
 }
