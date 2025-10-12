@@ -1,7 +1,7 @@
 use crate::config::{LogLevel, CONFIG};
 use crate::SUSPICION_SCORE;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::c_void;
 use windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
@@ -164,6 +164,26 @@ pub struct SectionInfo {
     pub virtual_address: usize,
     pub virtual_size: usize,
     pub characteristics: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PeHeaderInfo {
+    pub machine: String,
+    pub timestamp: String,
+    pub subsystem: String,
+    pub characteristics: String,
+    pub image_base: u64,
+    pub entry_point: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SectionDetail {
+    pub name: String,
+    pub virtual_address: u64,
+    pub virtual_size: u64,
+    pub raw_size: u64,
+    pub characteristics: String,
+    pub entropy: f32,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]

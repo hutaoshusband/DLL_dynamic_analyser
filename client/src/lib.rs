@@ -8,10 +8,8 @@ mod hooks;
 mod iat_monitor;
 mod logging;
 mod scanner;
-mod static_analyzer;
 mod string_dumper;
 mod vmp_dumper;
-
 use crate::config::{LogLevel, MonitorConfig, CONFIG};
 use crate::hooks::{cpprest_hook, winapi_hooks};
 use crate::logging::{Command, LogEntry, LogEvent, SectionInfo};
@@ -28,6 +26,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use widestring::U16CString;
 use windows_sys::Win32::Foundation::{CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE};
+use goblin::pe::PE;
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
     PIPE_TYPE_MESSAGE, PIPE_WAIT,
@@ -208,8 +207,8 @@ fn shannon_entropy(data: &[u8]) -> f32 {
 fn handle_calculate_entropy(section_name: &str) {
     debug_log(&format!("Handling CalculateEntropy command for section: {}", section_name));
     unsafe {
-        let base_address = GetModuleHandleW(std::ptr::null()) as *const u8;
-        if base_address.is_null() {
+        let base_address = GetModuleHandleW(std::ptr::null_mut()) as usize;
+        if base_address == 0 {
             log_event(LogLevel::Error, LogEvent::Error {
                 source: "handle_calculate_entropy".to_string(),
                 message: "Failed to get main module handle.".to_string(),
@@ -217,39 +216,26 @@ fn handle_calculate_entropy(section_name: &str) {
             return;
         }
 
-        let dos_header = &*(base_address as *const pelite::image::IMAGE_DOS_HEADER);
-        let nt_headers = &*(base_address.add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
-        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
-        let image_bytes = std::slice::from_raw_parts(base_address, image_size);
-
-        match pelite::PeFile::from_bytes(image_bytes) {
-            Ok(file) => {
-                if let Some(section) = file.section_headers().iter().find(|s| s.name().unwrap_or("") == section_name) {
-                    let mut data = vec![0u8; section.VirtualSize as usize];
-                    let section_start = (base_address as usize + section.VirtualAddress as usize) as *const u8;
-                    std::ptr::copy_nonoverlapping(section_start, data.as_mut_ptr(), data.len());
-
-                    const CHUNK_SIZE: usize = 256;
-                    let entropy = data.chunks(CHUNK_SIZE)
-                        .map(|chunk| shannon_entropy(chunk))
-                        .collect();
-
-                    log_event(LogLevel::Info, LogEvent::EntropyResult {
-                        name: section_name.to_string(),
-                        entropy,
-                    });
-                } else {
-                    log_event(LogLevel::Error, LogEvent::Error {
-                        source: "handle_calculate_entropy".to_string(),
-                        message: format!("Section '{}' not found.", section_name),
-                    });
+        let dos_header = &*(base_address as *const goblin::pe::header::DosHeader);
+        let nt_headers = &*((base_address as *const u8).add(dos_header.pe_pointer as usize) as *const goblin::pe::header::Header);
+        let image_size = (*nt_headers).optional_header.as_ref().unwrap().windows_fields.size_of_image as usize;
+        let image_slice = std::slice::from_raw_parts(base_address as *const u8, image_size);
+        if let Ok(pe) = PE::parse(image_slice) {
+            for section in &pe.sections {
+                if let Ok(name) = section.name() {
+                    if name == section_name {
+                        let data = &image_slice[section.pointer_to_raw_data as usize..][..section.size_of_raw_data as usize];
+                        const CHUNK_SIZE: usize = 256;
+                        let entropy = data.chunks(CHUNK_SIZE)
+                            .map(|chunk| shannon_entropy(chunk))
+                            .collect();
+                        log_event(LogLevel::Info, LogEvent::EntropyResult {
+                            name: section_name.to_string(),
+                            entropy,
+                        });
+                        return;
+                    }
                 }
-            },
-            Err(e) => {
-                log_event(LogLevel::Error, LogEvent::Error {
-                    source: "handle_calculate_entropy".to_string(),
-                    message: format!("Failed to parse PE file: {}", e),
-                });
             }
         }
     }
@@ -267,33 +253,31 @@ fn handle_dump_section(section_name: &str) {
             return;
         }
 
-        let dos_header = &*(base_address as *const pelite::image::IMAGE_DOS_HEADER);
-        let nt_headers = &*(base_address.add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
-        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
-        let image_bytes = std::slice::from_raw_parts(base_address, image_size);
+        let base_address = GetModuleHandleW(std::ptr::null_mut()) as usize;
+        if base_address == 0 {
+            log_event(LogLevel::Error, LogEvent::Error {
+                source: "handle_dump_section".to_string(),
+                message: "Failed to get main module handle.".to_string(),
+            });
+            return;
+        }
 
-        match pelite::PeFile::from_bytes(image_bytes) {
-            Ok(file) => {
-                if let Some(section) = file.section_headers().iter().find(|s| s.name().unwrap_or("") == section_name) {
-                    let mut data = vec![0u8; section.VirtualSize as usize];
-                    let section_start = (base_address as usize + section.VirtualAddress as usize) as *const u8;
-                    std::ptr::copy_nonoverlapping(section_start, data.as_mut_ptr(), data.len());
-                    log_event(LogLevel::Info, LogEvent::SectionDump {
-                        name: section_name.to_string(),
-                        data,
-                    });
-                } else {
-                    log_event(LogLevel::Error, LogEvent::Error {
-                        source: "handle_dump_section".to_string(),
-                        message: format!("Section '{}' not found.", section_name),
-                    });
+        let dos_header = &*(base_address as *const goblin::pe::header::DosHeader);
+        let nt_headers = &*((base_address as *const u8).add(dos_header.pe_pointer as usize) as *const goblin::pe::header::Header);
+        let image_size = (*nt_headers).optional_header.as_ref().unwrap().windows_fields.size_of_image as usize;
+        let image_slice = std::slice::from_raw_parts(base_address as *const u8, image_size);
+        if let Ok(pe) = PE::parse(image_slice) {
+            for section in &pe.sections {
+                if let Ok(name) = section.name() {
+                    if name == section_name {
+                        let data = &image_slice[section.pointer_to_raw_data as usize..][..section.size_of_raw_data as usize];
+                        log_event(LogLevel::Info, LogEvent::SectionDump {
+                            name: section_name.to_string(),
+                            data: data.to_vec(),
+                        });
+                        return;
+                    }
                 }
-            },
-            Err(e) => {
-                log_event(LogLevel::Error, LogEvent::Error {
-                    source: "handle_dump_section".to_string(),
-                    message: format!("Failed to parse PE file: {}", e),
-                });
             }
         }
     }
@@ -313,30 +297,29 @@ fn handle_list_sections() {
             return;
         }
 
-        let dos_header = &*(base_address as *const pelite::image::IMAGE_DOS_HEADER);
-        let nt_headers = &*(base_address.add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
-        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
-        let image_bytes = std::slice::from_raw_parts(base_address, image_size);
+        let base_address = GetModuleHandleW(std::ptr::null_mut()) as usize;
+        if base_address == 0 {
+            log_event(LogLevel::Error, LogEvent::Error {
+                source: "handle_calculate_entropy".to_string(),
+                message: "Failed to get main module handle.".to_string(),
+            });
+            return;
+        }
 
-        match pelite::PeFile::from_bytes(image_bytes) {
-            Ok(file) => {
-                let sections = file.section_headers().iter().map(|s| {
-                    SectionInfo {
-                        name: s.name().unwrap_or("").to_string(),
-                        virtual_address: s.VirtualAddress as usize,
-                        virtual_size: s.VirtualSize as usize,
-                        characteristics: s.Characteristics,
-                    }
-                }).collect();
-
-                log_event(LogLevel::Info, LogEvent::SectionList { sections });
-            },
-            Err(e) => {
-                log_event(LogLevel::Error, LogEvent::Error {
-                    source: "handle_list_sections".to_string(),
-                    message: format!("Failed to parse PE file: {}", e),
-                });
-            }
+        let dos_header = &*(base_address as *const goblin::pe::header::DosHeader);
+        let nt_headers = &*((base_address as *const u8).add(dos_header.pe_pointer as usize) as *const goblin::pe::header::Header);
+        let image_size = (*nt_headers).optional_header.as_ref().unwrap().windows_fields.size_of_image as usize;
+        let image_slice = std::slice::from_raw_parts(base_address as *const u8, image_size);
+        if let Ok(pe) = PE::parse(image_slice) {
+            let sections = pe.sections.iter().map(|s| {
+                SectionInfo {
+                    name: s.name().unwrap_or("").to_string(),
+                    virtual_address: s.virtual_address as usize,
+                    virtual_size: s.virtual_size as usize,
+                    characteristics: s.characteristics,
+                }
+            }).collect();
+            log_event(LogLevel::Info, LogEvent::SectionList { sections });
         }
     }
 }

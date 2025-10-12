@@ -1,4 +1,3 @@
-
 use chrono::{DateTime, Utc};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -105,6 +104,7 @@ pub enum Command {
     ListSections,
     DumpSection { name: String },
     CalculateEntropy { name: String },
+    GetPeDetails,
 }
 
 impl PartialEq for LogEvent {
@@ -149,6 +149,7 @@ struct ModuleInfo {
     base_address: usize,
     size: u32,
 }
+
 
 struct MyApp {
     target_process_name: String,
@@ -207,7 +208,7 @@ impl eframe::App for MyApp {
                     }
                     LogEvent::SectionDump { name, data } => {
                         if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
-                            if let Err(e) = std::fs::write(&path, data) {
+                            if let Err(_e) = std::fs::write(&path, data) {
                                 // Log error to GUI
                             }
                         }
@@ -230,36 +231,41 @@ impl eframe::App for MyApp {
             ui.heading("DLL Dynamic Analyzer");
             ui.separator();
 
-            ui.horizontal(|ui| {
-                ui.label("Target Process Name:");
-                ui.text_edit_singleline(&mut self.target_process_name);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Target Process ID:");
-                ui.text_edit_singleline(&mut self.manual_injection_pid);
-                if ui.button("Inject by PID").clicked() {
-                    if let Ok(pid) = self.manual_injection_pid.parse::<u32>() {
-                        start_analysis_thread(self, None, Some(pid));
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.heading("Target Selection");
+                ui.horizontal(|ui| {
+                    ui.label("Target Process Name:");
+                    ui.text_edit_singleline(&mut self.target_process_name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Target Process ID:");
+                    ui.text_edit_singleline(&mut self.manual_injection_pid);
+                    if ui.button("Inject by PID").clicked() {
+                        if let Ok(pid) = self.manual_injection_pid.parse::<u32>() {
+                            start_analysis_thread(self, None, Some(pid));
+                        }
                     }
-                }
+                });
             });
 
             ui.separator();
-            ui.heading("Analysis Options");
-            egui::Grid::new("analysis_options_grid").num_columns(2).show(ui, |ui| {
-                ui.checkbox(&mut self.monitor_config.api_hooks_enabled, "API Hooks");
-                ui.checkbox(&mut self.monitor_config.iat_scan_enabled, "IAT Scans");
-                ui.end_row();
-                ui.checkbox(&mut self.monitor_config.string_dump_enabled, "String Dumper");
-                ui.checkbox(&mut self.monitor_config.vmp_dump_enabled, "VMP Dumper");
-                ui.end_row();
-                ui.checkbox(&mut self.monitor_config.manual_map_scan_enabled, "Manual Map Scans");
-                ui.checkbox(&mut self.monitor_config.network_hooks_enabled, "Network Hooks");
-                ui.end_row();
-                ui.checkbox(&mut self.monitor_config.registry_hooks_enabled, "Registry Hooks");
-                ui.checkbox(&mut self.monitor_config.crypto_hooks_enabled, "Crypto Hooks");
-                ui.end_row();
-                ui.checkbox(&mut self.monitor_config.log_network_data, "Log Network Data Payloads");
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.heading("Analysis Options");
+                egui::Grid::new("analysis_options_grid").num_columns(2).show(ui, |ui| {
+                    ui.checkbox(&mut self.monitor_config.api_hooks_enabled, "API Hooks");
+                    ui.checkbox(&mut self.monitor_config.iat_scan_enabled, "IAT Scans");
+                    ui.end_row();
+                    ui.checkbox(&mut self.monitor_config.string_dump_enabled, "String Dumper");
+                    ui.checkbox(&mut self.monitor_config.vmp_dump_enabled, "VMP Dumper");
+                    ui.end_row();
+                    ui.checkbox(&mut self.monitor_config.manual_map_scan_enabled, "Manual Map Scans");
+                    ui.checkbox(&mut self.monitor_config.network_hooks_enabled, "Network Hooks");
+                    ui.end_row();
+                    ui.checkbox(&mut self.monitor_config.registry_hooks_enabled, "Registry Hooks");
+                    ui.checkbox(&mut self.monitor_config.crypto_hooks_enabled, "Crypto Hooks");
+                    ui.end_row();
+                    ui.checkbox(&mut self.monitor_config.log_network_data, "Log Network Data Payloads");
+                });
             });
             ui.separator();
 
@@ -275,90 +281,92 @@ impl eframe::App for MyApp {
             });
 
             ui.separator();
-            ui.heading("DLLs in Target Process");
-            ui.horizontal(|ui| {
-                if ui.add_enabled(self.is_process_running.load(Ordering::SeqCst), egui::Button::new("Refresh Modules")).clicked() {
-                    if let Some(pid) = *self.process_id.lock().unwrap() {
-                        match get_modules_for_process(pid) {
-                            Ok(modules) => *self.modules.lock().unwrap() = modules,
-                            Err(e) => {
-                                let _ = self.log_sender.send(format!("Error getting modules: {}", e));
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.heading("Module & Memory Analysis");
+                ui.collapsing("DLLs in Target Process", |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(self.is_process_running.load(Ordering::SeqCst), egui::Button::new("Refresh Modules")).clicked() {
+                            if let Some(pid) = *self.process_id.lock().unwrap() {
+                                match get_modules_for_process(pid) {
+                                    Ok(modules) => *self.modules.lock().unwrap() = modules,
+                                    Err(e) => {
+                                        let _ = self.log_sender.send(format!("Error getting modules: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        if ui.add_enabled(self.selected_module_index.is_some(), egui::Button::new("Dump Selected DLL")).clicked() {
+                             if let (Some(handle), Some(index)) = (*self.process_handle.lock().unwrap(), self.selected_module_index) {
+                                let modules = self.modules.lock().unwrap();
+                                if let Some(module_info) = modules.get(index) {
+                                    let logger = self.log_sender.clone();
+                                    let module_clone = module_info.clone();
+                                    thread::spawn(move || {
+                                        dump_module_from_process(handle, &module_clone, &logger);
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    let modules_guard = self.modules.lock().unwrap();
+                    let module_names: Vec<String> = modules_guard.iter().map(|m| m.name.clone()).collect();
+                    let selected_module_name = self.selected_module_index.and_then(|i| module_names.get(i).cloned()).unwrap_or_else(|| "No Module Selected".to_string());
+                    egui::ComboBox::from_label("").selected_text(selected_module_name).show_ui(ui, |ui| {
+                        for (i, name) in module_names.iter().enumerate() {
+                            if ui.selectable_label(self.selected_module_index == Some(i), name).clicked() {
+                                self.selected_module_index = Some(i);
+                            }
+                        }
+                    });
+                });
+
+                ui.collapsing("Memory Sections", |ui| {
+                    if ui.button("Refresh Sections").clicked() {
+                        if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
+                            let command = Command::ListSections;
+                            if let Ok(command_json) = serde_json::to_string(&command) {
+                                unsafe {
+                                    WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
+                                }
                             }
                         }
                     }
-                }
-                if ui.add_enabled(self.selected_module_index.is_some(), egui::Button::new("Dump Selected DLL")).clicked() {
-                     if let (Some(handle), Some(index)) = (*self.process_handle.lock().unwrap(), self.selected_module_index) {
-                        let modules = self.modules.lock().unwrap();
-                        if let Some(module_info) = modules.get(index) {
-                            let logger = self.log_sender.clone();
-                            let module_clone = module_info.clone();
-                            thread::spawn(move || {
-                                dump_module_from_process(handle, &module_clone, &logger);
+
+                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        let sections = self.sections.lock().unwrap().clone();
+                        for section in sections.iter() {
+                            ui.horizontal(|ui| {
+                                if ui.selectable_label(self.selected_section_name == Some(section.name.clone()), &section.name).clicked() {
+                                    self.selected_section_name = Some(section.name.clone());
+                                }
+                                ui.label(format!(
+                                    "Address: {:#X}, Size: {} bytes",
+                                    section.virtual_address, section.virtual_size
+                                ));
+                                if ui.button("Dump").clicked() {
+                                    if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
+                                        let command = Command::DumpSection { name: section.name.clone() };
+                                        if let Ok(command_json) = serde_json::to_string(&command) {
+                                            unsafe {
+                                                WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
+                                            }
+                                        }
+                                    }
+                                }
+                                if ui.button("Entropy Scan").clicked() {
+                                    if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
+                                        let command = Command::CalculateEntropy { name: section.name.clone() };
+                                        if let Ok(command_json) = serde_json::to_string(&command) {
+                                            unsafe {
+                                                WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
+                                            }
+                                        }
+                                    }
+                                }
                             });
                         }
-                    }
-                }
-            });
-
-            let modules_guard = self.modules.lock().unwrap();
-            let module_names: Vec<String> = modules_guard.iter().map(|m| m.name.clone()).collect();
-            let selected_module_name = self.selected_module_index.and_then(|i| module_names.get(i).cloned()).unwrap_or_else(|| "No Module Selected".to_string());
-            egui::ComboBox::from_label("").selected_text(selected_module_name).show_ui(ui, |ui| {
-                for (i, name) in module_names.iter().enumerate() {
-                    if ui.selectable_label(self.selected_module_index == Some(i), name).clicked() {
-                        self.selected_module_index = Some(i);
-                    }
-                }
-            });
-
-            ui.separator();
-
-            ui.collapsing("Memory Sections", |ui| {
-                if ui.button("Refresh Sections").clicked() {
-                    if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
-                        let command = Command::ListSections;
-                        if let Ok(command_json) = serde_json::to_string(&command) {
-                            unsafe {
-                                WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
-                            }
-                        }
-                    }
-                }
-
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    let sections = self.sections.lock().unwrap().clone();
-                    for section in sections.iter() {
-                        ui.horizontal(|ui| {
-                            if ui.selectable_label(self.selected_section_name == Some(section.name.clone()), &section.name).clicked() {
-                                self.selected_section_name = Some(section.name.clone());
-                            }
-                            ui.label(format!(
-                                "Address: {:#X}, Size: {} bytes",
-                                section.virtual_address, section.virtual_size
-                            ));
-                            if ui.button("Dump").clicked() {
-                                if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
-                                    let command = Command::DumpSection { name: section.name.clone() };
-                                    if let Ok(command_json) = serde_json::to_string(&command) {
-                                        unsafe {
-                                            WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
-                                        }
-                                    }
-                                }
-                            }
-                            if ui.button("Entropy Scan").clicked() {
-                                if let Some(pipe_handle) = *self.pipe_handle.lock().unwrap() {
-                                    let command = Command::CalculateEntropy { name: section.name.clone() };
-                                    if let Ok(command_json) = serde_json::to_string(&command) {
-                                        unsafe {
-                                            WriteFile(pipe_handle, command_json.as_ptr(), command_json.len() as u32, &mut 0, std::ptr::null_mut());
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
+                    });
                 });
             });
 
@@ -381,23 +389,27 @@ impl eframe::App for MyApp {
                 }
             });
 
+
             ui.separator();
             ui.label(format!("Status: {}", *self.injection_status.lock().unwrap()));
-            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                for (log, count) in &self.logs {
-                    let color = match log.level {
-                        LogLevel::Fatal | LogLevel::Error => egui::Color32::RED,
-                        LogLevel::Success => egui::Color32::GREEN,
-                        LogLevel::Warn => egui::Color32::from_rgb(255, 165, 0),
-                        LogLevel::Info => egui::Color32::YELLOW,
-                        _ => egui::Color32::LIGHT_BLUE,
-                    };
-                    let mut log_text = format!("[{}] {}", log.timestamp.format("%H:%M:%S"), format_log_event(&log.event));
-                    if *count > 1 {
-                        log_text = format!("({}x) {}", count, log_text);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.heading("Live Logs");
+                egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                    for (log, count) in &self.logs {
+                        let color = match log.level {
+                            LogLevel::Fatal | LogLevel::Error => egui::Color32::RED,
+                            LogLevel::Success => egui::Color32::GREEN,
+                            LogLevel::Warn => egui::Color32::from_rgb(255, 165, 0),
+                            LogLevel::Info => egui::Color32::YELLOW,
+                            _ => egui::Color32::LIGHT_BLUE,
+                        };
+                        let mut log_text = format!("[{}] {}", log.timestamp.format("%H:%M:%S"), format_log_event(&log.event));
+                        if *count > 1 {
+                            log_text = format!("({}x) {}", count, log_text);
+                        }
+                        ui.colored_label(color, log_text);
                     }
-                    ui.colored_label(color, log_text);
-                }
+                });
             });
         });
         ctx.request_repaint();
@@ -756,7 +768,14 @@ fn main() -> Result<(), eframe::Error> {
         ..Default::default()
     };
     eframe::run_native("DLL Dynamic Analyzer", options, Box::new(|cc| {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.visuals = egui::Visuals {
+            dark_mode: true,
+            override_text_color: Some(egui::Color32::from_rgb(220, 220, 220)),
+            widgets: egui::style::Widgets::default(),
+            ..egui::Visuals::dark()
+        };
+        cc.egui_ctx.set_style(style);
         Box::new(MyApp::new(cc))
     }))
 }

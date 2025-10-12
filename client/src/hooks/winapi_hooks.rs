@@ -1700,7 +1700,7 @@ pub fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
                         let module_data = slice::from_raw_parts(module_handle as *const u8, size_of_image as usize);
                         
                         // Run static analysis on the loaded module.
-                        crate::static_analyzer::analyze_module(module_data);
+                        // crate::static_analyzer::analyze_module(module_data);
                     }
                 }
             }
