@@ -14,7 +14,7 @@ mod vmp_dumper;
 
 use crate::config::{LogLevel, MonitorConfig, CONFIG};
 use crate::hooks::{cpprest_hook, winapi_hooks};
-use crate::logging::{LogEntry, LogEvent};
+use crate::logging::{Command, LogEntry, LogEvent, SectionInfo};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
 use std::cell::Cell;
@@ -130,9 +130,16 @@ fn main_initialization_thread() {
             debug_log("Config parsed successfully.");
             if CONFIG.features.set(config).is_ok() {
                 let (sender, receiver) = bounded(1024);
+                let log_sender_clone = sender.clone();
                 LOG_SENDER.set(sender).expect("Log sender already set");
+
                 let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
-                THREAD_HANDLES.lock().unwrap().push(log_thread);
+                let command_thread = thread::spawn(move || command_listener_thread(pipe_handle));
+
+                let mut handles = THREAD_HANDLES.lock().unwrap();
+                handles.push(log_thread);
+                handles.push(command_thread);
+
                 debug_log("Starting feature initialization...");
                 initialize_features(config);
                 debug_log("Feature initialization returned.");
@@ -146,6 +153,192 @@ fn main_initialization_thread() {
         unsafe { CloseHandle(pipe_handle); }
     }
     debug_log("main_initialization_thread finished.");
+}
+
+fn command_listener_thread(pipe_handle: isize) {
+    debug_log("Command listener thread started.");
+    let mut buffer = [0u8; 4096];
+    loop {
+        let mut bytes_read = 0;
+        let success = unsafe {
+            ReadFile(
+                pipe_handle,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as u32,
+                &mut bytes_read,
+                std::ptr::null_mut(),
+            )
+        } != 0;
+
+        if success && bytes_read > 0 {
+            let command_str = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
+            debug_log(&format!("Received command string: {}", command_str));
+            match serde_json::from_str::<Command>(&command_str) {
+                Ok(Command::ListSections) => handle_list_sections(),
+                Ok(Command::DumpSection { name }) => handle_dump_section(&name),
+                Ok(Command::CalculateEntropy { name }) => handle_calculate_entropy(&name),
+                Err(e) => debug_log(&format!("Failed to parse command: {}", e)),
+            }
+        } else {
+            let error = unsafe { GetLastError() };
+            debug_log(&format!("ReadFile failed in command listener with error: {}. Shutting down.", error));
+            break;
+        }
+    }
+    debug_log("Command listener thread finished.");
+}
+
+fn shannon_entropy(data: &[u8]) -> f32 {
+    if data.is_empty() {
+        return 0.0;
+    }
+
+    let mut counts = std::collections::HashMap::new();
+    for &byte in data {
+        *counts.entry(byte).or_insert(0) += 1;
+    }
+
+    let len = data.len() as f32;
+    counts.values().map(|&count| {
+        let p = count as f32 / len;
+        -p * p.log2()
+    }).sum()
+}
+
+fn handle_calculate_entropy(section_name: &str) {
+    debug_log(&format!("Handling CalculateEntropy command for section: {}", section_name));
+    unsafe {
+        let base_address = GetModuleHandleW(std::ptr::null()) as *const u8;
+        if base_address.is_null() {
+            log_event(LogLevel::Error, LogEvent::Error {
+                source: "handle_calculate_entropy".to_string(),
+                message: "Failed to get main module handle.".to_string(),
+            });
+            return;
+        }
+
+        let dos_header = &*(base_address as *const pelite::image::IMAGE_DOS_HEADER);
+        let nt_headers = &*(base_address.add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
+        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let image_bytes = std::slice::from_raw_parts(base_address, image_size);
+
+        match pelite::PeFile::from_bytes(image_bytes) {
+            Ok(file) => {
+                if let Some(section) = file.section_headers().iter().find(|s| s.name().unwrap_or("") == section_name) {
+                    let mut data = vec![0u8; section.VirtualSize as usize];
+                    let section_start = (base_address as usize + section.VirtualAddress as usize) as *const u8;
+                    std::ptr::copy_nonoverlapping(section_start, data.as_mut_ptr(), data.len());
+
+                    const CHUNK_SIZE: usize = 256;
+                    let entropy = data.chunks(CHUNK_SIZE)
+                        .map(|chunk| shannon_entropy(chunk))
+                        .collect();
+
+                    log_event(LogLevel::Info, LogEvent::EntropyResult {
+                        name: section_name.to_string(),
+                        entropy,
+                    });
+                } else {
+                    log_event(LogLevel::Error, LogEvent::Error {
+                        source: "handle_calculate_entropy".to_string(),
+                        message: format!("Section '{}' not found.", section_name),
+                    });
+                }
+            },
+            Err(e) => {
+                log_event(LogLevel::Error, LogEvent::Error {
+                    source: "handle_calculate_entropy".to_string(),
+                    message: format!("Failed to parse PE file: {}", e),
+                });
+            }
+        }
+    }
+}
+
+fn handle_dump_section(section_name: &str) {
+    debug_log(&format!("Handling DumpSection command for section: {}", section_name));
+    unsafe {
+        let base_address = GetModuleHandleW(std::ptr::null()) as *const u8;
+        if base_address.is_null() {
+            log_event(LogLevel::Error, LogEvent::Error {
+                source: "handle_dump_section".to_string(),
+                message: "Failed to get main module handle.".to_string(),
+            });
+            return;
+        }
+
+        let dos_header = &*(base_address as *const pelite::image::IMAGE_DOS_HEADER);
+        let nt_headers = &*(base_address.add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
+        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let image_bytes = std::slice::from_raw_parts(base_address, image_size);
+
+        match pelite::PeFile::from_bytes(image_bytes) {
+            Ok(file) => {
+                if let Some(section) = file.section_headers().iter().find(|s| s.name().unwrap_or("") == section_name) {
+                    let mut data = vec![0u8; section.VirtualSize as usize];
+                    let section_start = (base_address as usize + section.VirtualAddress as usize) as *const u8;
+                    std::ptr::copy_nonoverlapping(section_start, data.as_mut_ptr(), data.len());
+                    log_event(LogLevel::Info, LogEvent::SectionDump {
+                        name: section_name.to_string(),
+                        data,
+                    });
+                } else {
+                    log_event(LogLevel::Error, LogEvent::Error {
+                        source: "handle_dump_section".to_string(),
+                        message: format!("Section '{}' not found.", section_name),
+                    });
+                }
+            },
+            Err(e) => {
+                log_event(LogLevel::Error, LogEvent::Error {
+                    source: "handle_dump_section".to_string(),
+                    message: format!("Failed to parse PE file: {}", e),
+                });
+            }
+        }
+    }
+}
+
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+
+fn handle_list_sections() {
+    debug_log("Handling ListSections command.");
+    unsafe {
+        let base_address = GetModuleHandleW(std::ptr::null()) as *const u8;
+        if base_address.is_null() {
+            log_event(LogLevel::Error, LogEvent::Error {
+                source: "handle_list_sections".to_string(),
+                message: "Failed to get main module handle.".to_string(),
+            });
+            return;
+        }
+
+        let dos_header = &*(base_address as *const pelite::image::IMAGE_DOS_HEADER);
+        let nt_headers = &*(base_address.add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
+        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let image_bytes = std::slice::from_raw_parts(base_address, image_size);
+
+        match pelite::PeFile::from_bytes(image_bytes) {
+            Ok(file) => {
+                let sections = file.section_headers().iter().map(|s| {
+                    SectionInfo {
+                        name: s.name().unwrap_or("").to_string(),
+                        virtual_address: s.VirtualAddress as usize,
+                        virtual_size: s.VirtualSize as usize,
+                        characteristics: s.Characteristics,
+                    }
+                }).collect();
+
+                log_event(LogLevel::Info, LogEvent::SectionList { sections });
+            },
+            Err(e) => {
+                log_event(LogLevel::Error, LogEvent::Error {
+                    source: "handle_list_sections".to_string(),
+                    message: format!("Failed to parse PE file: {}", e),
+                });
+            }
+        }
+    }
 }
 
 fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {

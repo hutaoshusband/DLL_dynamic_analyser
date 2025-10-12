@@ -144,4 +144,32 @@ pub enum LogEvent {
         finding: String,
         details: String,
     },
+    SectionList {
+        sections: Vec<SectionInfo>,
+    },
+    SectionDump {
+        name: String,
+        data: Vec<u8>,
+    },
+    EntropyResult {
+        name: String,
+        entropy: Vec<f32>,
+    },
+}
+
+/// Holds information about a single PE section.
+#[derive(Serialize, Debug, Clone)]
+pub struct SectionInfo {
+    pub name: String,
+    pub virtual_address: usize,
+    pub virtual_size: usize,
+    pub characteristics: u32,
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(tag = "command", content = "payload")]
+pub enum Command {
+    ListSections,
+    DumpSection { name: String },
+    CalculateEntropy { name: String },
 }
