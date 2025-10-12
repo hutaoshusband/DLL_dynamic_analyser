@@ -8,319 +8,222 @@ mod hooks;
 mod iat_monitor;
 mod logging;
 mod scanner;
-mod vmp_dumper;
 mod static_analyzer;
 mod string_dumper;
+mod vmp_dumper;
 
-use crate::config::{LogLevel, CONFIG};
-use crate::hooks::cpprest_hook;
-use crate::hooks::winapi_hooks::initialize_all_hooks;
+use crate::config::{LogLevel, MonitorConfig, CONFIG};
+use crate::hooks::{cpprest_hook, winapi_hooks};
 use crate::logging::{LogEntry, LogEvent};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
 use std::cell::Cell;
-use std::ffi::{c_void, OsString};
+use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::windows::ffi::OsStringExt;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use widestring::U16CString;
 use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HINSTANCE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Storage::FileSystem::{CreateFileW, WriteFile, OPEN_EXISTING};
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
+    PIPE_TYPE_MESSAGE, PIPE_WAIT,
+};
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
-use windows_sys::Win32::System::Threading::{GetCurrentProcessId, Sleep};
-use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
+use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Security::{
+    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR,
+};
 
-// Globals for logging and thread management.
+// --- Globals ---
 pub static SUSPICION_SCORE: AtomicUsize = AtomicUsize::new(0);
-static LOG_SENDER: OnceCell<Sender<Option<(LogLevel, LogEvent)>>> = OnceCell::new();
+static LOG_SENDER: OnceCell<Sender<Option<LogEntry>>> = OnceCell::new();
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
-static SCANNER_THREAD_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
-static LOGGING_THREAD_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static THREAD_HANDLES: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
 
-// Thread-local flag to prevent re-entrancy in hooks.
 thread_local!(static IN_HOOK: Cell<bool> = Cell::new(false));
 
-/// A guard to prevent re-entrant calls to hooked functions.
 pub struct ReentrancyGuard;
-
 impl ReentrancyGuard {
     pub fn new() -> Option<ReentrancyGuard> {
         IN_HOOK.with(|in_hook| {
-            if in_hook.get() {
-                None
-            } else {
-                in_hook.set(true);
-                Some(ReentrancyGuard)
-            }
+            if in_hook.get() { None } else { in_hook.set(true); Some(ReentrancyGuard) }
         })
     }
 }
-
 impl Drop for ReentrancyGuard {
-    fn drop(&mut self) {
-        IN_HOOK.with(|in_hook| in_hook.set(false));
-    }
+    fn drop(&mut self) { IN_HOOK.with(|in_hook| in_hook.set(false)); }
 }
 
-/// The central logging function. It's lightweight, non-blocking, and filters
-/// events based on the configured log level.
 pub fn log_event(level: LogLevel, event: LogEvent) {
-    if level > CONFIG.log_level {
-        return; // Filter out messages below the configured level.
-    }
+    if level > CONFIG.log_level { return; }
     if let Some(sender) = LOG_SENDER.get() {
-        let _ = sender.try_send(Some((level, event)));
+        let entry = LogEntry::new(level, event);
+        let _ = sender.try_send(Some(entry));
     }
 }
 
-fn logging_thread_main(receiver: Receiver<Option<(LogLevel, LogEvent)>>) {
-    let (pipe_handle, mut log_file) = {
-        // The initialization of the pipe and log file involves calling Windows APIs
-        // that we are hooking (e.g., CreateFileW). To prevent these initial calls
-        // from generating log events that would then try to write to a not-yet-ready
-        // log file, we wrap the entire setup in a ReentrancyGuard. This sets a
-        // thread-local flag that our hooks will check, causing them to bypass
-        // logging for any API calls made within this block.
-        let _guard = ReentrancyGuard::new();
-
-        let pid = unsafe { GetCurrentProcessId() };
+/// The main initialization thread. Creates the pipe server, waits for config, and starts features.
+fn main_initialization_thread() {
+    let pipe_handle = unsafe {
+        let pid = GetCurrentProcessId();
         let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
-        let wide_pipe_name: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut pipe_handle = INVALID_HANDLE_VALUE;
+        let wide_pipe_name = U16CString::from_str(&pipe_name).unwrap();
 
-        // Attempt to connect to the named pipe for the GUI.
-        for _ in 0..5 {
-            pipe_handle = unsafe {
-                CreateFileW(
-                    wide_pipe_name.as_ptr(),
-                    0x40000000, // GENERIC_WRITE
-                    0,
-                    std::ptr::null(),
-                    OPEN_EXISTING,
-                    0,
-                    0,
-                )
-            };
-            if pipe_handle != INVALID_HANDLE_VALUE {
-                break;
+        let mut sa: SECURITY_ATTRIBUTES = std::mem::zeroed();
+        let mut sd: SECURITY_DESCRIPTOR = std::mem::zeroed();
+        InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1);
+        SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, std::ptr::null_mut(), 0);
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.lpSecurityDescriptor = &mut sd as *mut _ as *mut _;
+        sa.bInheritHandle = 0;
+
+        CreateNamedPipeW(
+            wide_pipe_name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            1, 4096, 4096, 0, &sa,
+        )
+    };
+
+    if pipe_handle == INVALID_HANDLE_VALUE { return; }
+
+    let connected = unsafe { ConnectNamedPipe(pipe_handle, std::ptr::null_mut()) != 0 };
+    if !connected {
+        unsafe { CloseHandle(pipe_handle); }
+        return;
+    }
+
+    let mut buffer = [0u8; 1024];
+    let mut bytes_read = 0;
+    let success = unsafe {
+        ReadFile(pipe_handle, buffer.as_mut_ptr() as _, buffer.len() as u32, &mut bytes_read, std::ptr::null_mut())
+    } != 0;
+
+    if success && bytes_read > 0 {
+        let config_str = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
+        if let Ok(config) = serde_json::from_str::<MonitorConfig>(&config_str) {
+            if CONFIG.features.set(config).is_ok() {
+                let (sender, receiver) = unbounded();
+                LOG_SENDER.set(sender).expect("Log sender already set");
+                let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
+                THREAD_HANDLES.lock().unwrap().push(log_thread);
+                initialize_features(config);
             }
-            unsafe { Sleep(500) };
+        } else {
+            unsafe { CloseHandle(pipe_handle); }
         }
+    } else {
+        unsafe { CloseHandle(pipe_handle); }
+    }
+}
 
-        // Set up the log file in %LOCALAPPDATA%.
-        let mut log_file: Option<File> = None;
-        unsafe {
-            let mut path_buf = vec![0u16; 260];
-            if SHGetFolderPathW(0, CSIDL_LOCAL_APPDATA as i32, 0, 0, path_buf.as_mut_ptr()) >= 0 {
-                let len = path_buf.iter().position(|&c| c == 0).unwrap_or(path_buf.len());
-                let appdata_path = OsString::from_wide(&path_buf[..len]);
-                let mut log_dir = PathBuf::from(appdata_path);
-                log_dir.push("cs2_monitor");
-                log_dir.push("logs");
-                if fs::create_dir_all(&log_dir).is_ok() {
-                    // Find an unused log file name.
-                    let mut i = 1;
-                    loop {
-                        let log_path = log_dir.join(format!("log{}.txt", i));
-                        if !log_path.exists() {
-                            log_file =
-                                OpenOptions::new().create(true).append(true).open(log_path).ok();
-                            break;
-                        }
-                        i += 1;
-                        if i > 1000 {
-                            break;
-                        } // Safety break.
-                    }
-                }
-            }
-        }
-        (pipe_handle, log_file)
-    }; // The _guard is dropped here, re-enabling logging for subsequent API calls.
-
-    while let Ok(Some((level, event))) = receiver.recv() {
-        // First, attempt to serialize the event to see if it's a special command.
-        // We serialize it to a Value to inspect it without committing to a full log string yet.
-        if let Ok(value) = serde_json::to_value(LogEntry::new(level, event.clone())) {
-            let mut is_command = false;
-            if let Some(event_obj) = value.get("event") {
-                if let Some(details) = event_obj.get("details") {
-                    if let Some(command) = details.get("command").and_then(|c| c.as_str()) {
-                        vmp_dumper::handle_command(command);
-                        is_command = true;
-                    }
-                } else if let Some(command) = event_obj.get("command").and_then(|c| c.as_str()) {
-                    // Fallback for simpler command structures
-                    vmp_dumper::handle_command(command);
-                    is_command = true;
-                }
-            }
-
-            // If it was a command, we skip logging it to avoid clutter.
-            if is_command {
-                continue;
+fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {
+    let mut log_file = {
+        let _guard = ReentrancyGuard::new();
+        let mut file: Option<File> = None;
+        if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
+            let mut log_dir = PathBuf::from(appdata);
+            log_dir.push("cs2_monitor");
+            log_dir.push("logs");
+            if fs::create_dir_all(&log_dir).is_ok() {
+                let log_path = log_dir.join(format!("log_{}.txt", unsafe { GetCurrentProcessId() }));
+                file = OpenOptions::new().create(true).append(true).open(log_path).ok();
             }
         }
+        file
+    };
 
-        // If it wasn't a command, proceed with normal logging.
-        let log_entry = LogEntry::new(level, event);
+    while let Ok(Some(log_entry)) = receiver.recv() {
         if let Ok(json_string) = serde_json::to_string(&log_entry) {
             let formatted_message = format!("{}\n", json_string);
             let bytes = formatted_message.as_bytes();
 
-            // Use the re-entrancy guard to prevent self-logging.
             if let Some(_guard) = ReentrancyGuard::new() {
-                // Write to the log file.
                 if let Some(file) = log_file.as_mut() {
                     let _ = file.write_all(bytes);
                     let _ = file.flush();
                 }
-
-                // Write to the named pipe if connected.
                 if pipe_handle != INVALID_HANDLE_VALUE {
                     unsafe {
-                        WriteFile(
-                            pipe_handle,
-                            bytes.as_ptr(),
-                            bytes.len() as u32,
-                            &mut 0,
-                            std::ptr::null_mut(),
-                        )
-                    };
+                        WriteFile(pipe_handle, bytes.as_ptr(), bytes.len() as u32, &mut 0, std::ptr::null_mut());
+                    }
                 }
             }
         }
     }
 
     if pipe_handle != INVALID_HANDLE_VALUE {
-        unsafe { CloseHandle(pipe_handle) };
+        unsafe {
+            DisconnectNamedPipe(pipe_handle);
+            CloseHandle(pipe_handle);
+        }
     }
 }
 
-fn dll_main_internal() -> Result<(), String> {
-    let (sender, receiver) = unbounded::<Option<(LogLevel, LogEvent)>>();
-    LOG_SENDER
-        .set(sender)
-        .map_err(|_| "Failed to set the global log sender.".to_string())?;
+fn initialize_features(config: MonitorConfig) {
+    log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", config) });
 
-    let logging_handle = thread::spawn(move || logging_thread_main(receiver));
-    *LOGGING_THREAD_HANDLE.lock().unwrap() = Some(logging_handle);
-
-    log_event(
-        LogLevel::Info,
-        LogEvent::Initialization {
-            status: "Monitor DLL initializing...".to_string(),
-        },
-    );
-
-    // Send the address of the termination flag to the injector GUI.
     let addr = &CONFIG.termination_allowed as *const _ as usize;
-    log_event(LogLevel::Debug, LogEvent::Initialization {
-        status: format!("TERMINATION_FLAG_ADDR:{}", addr),
-    });
+    log_event(LogLevel::Debug, LogEvent::Initialization { status: format!("TERMINATION_FLAG_ADDR:{}", addr) });
 
-    unsafe {
-        initialize_all_hooks()?;
-    }
-
-    // Start the VMP dumper's background monitoring thread.
-    vmp_dumper::start_vmp_monitoring();
-
-    // Spawn a thread for the cpprest hook.
-    thread::spawn(cpprest_hook::initialize_and_enable_hook);
-
-    // Start the string dumper thread.
-    string_dumper::start_string_dumper();
-
-    // Spawn the memory scanner thread.
-    let scanner_handle = thread::spawn(|| {
-        let mut last_vmp_scan = Instant::now();
-        let vmp_scan_cooldown = Duration::from_secs(60); // Scan every minute
-
-        while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
-            unsafe {
-                // These scans are lightweight and can run more frequently.
-                scanner::scan_for_manual_mapping();
-                code_monitor::monitor_code_modifications();
-                hardware_bp::check_debug_registers();
-                iat_monitor::scan_iat_modifications();
-
-                // Perform the VMP section scan on a cooldown.
-                if last_vmp_scan.elapsed() >= vmp_scan_cooldown {
-                    log_event(
-                        LogLevel::Info,
-                        LogEvent::MemoryScan {
-                            status: "Starting VMP section scan on all loaded modules."
-                                .to_string(),
-                            result: "".to_string(),
-                        },
-                    );
-                    let modules = scanner::enumerate_modules();
-                    for (path, mem_slice) in modules {
-                        // The new function needs the base address, not the whole slice.
-                        scanner::scan_for_vmp_sections(&path, mem_slice.as_ptr() as usize);
-                    }
-                    last_vmp_scan = Instant::now();
-                }
-            }
-            // Sleep for a bit to avoid excessive CPU usage.
-            for _ in 0..50 {
-                // Sleep for 5 seconds total
-                if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
+    if config.api_hooks_enabled {
+        unsafe {
+            if let Err(e) = winapi_hooks::initialize_all_hooks() {
+                log_event(LogLevel::Error, LogEvent::Error { source: "HookInit".into(), message: e });
             }
         }
-    });
-    *SCANNER_THREAD_HANDLE.lock().unwrap() = Some(scanner_handle);
+        thread::spawn(cpprest_hook::initialize_and_enable_hook);
+    }
 
-    log_event(
-        LogLevel::Info,
-        LogEvent::Initialization {
-            status: "Monitor DLL initialized successfully.".to_string(),
-        },
-    );
-    Ok(())
+    let mut scanner_threads = Vec::new();
+    if config.vmp_dump_enabled {
+        scanner_threads.push(thread::spawn(vmp_dumper::start_vmp_monitoring));
+    }
+    if config.string_dump_enabled {
+        scanner_threads.push(thread::spawn(string_dumper::start_string_dumper));
+    }
+    if config.iat_scan_enabled || config.manual_map_scan_enabled {
+        let iat = config.iat_scan_enabled;
+        let manual_map = config.manual_map_scan_enabled;
+        let scanner_handle = thread::spawn(move || {
+            while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
+                unsafe {
+                    if iat { iat_monitor::scan_iat_modifications(); }
+                    if manual_map {
+                        scanner::scan_for_manual_mapping();
+                        code_monitor::monitor_code_modifications();
+                        hardware_bp::check_debug_registers();
+                    }
+                }
+                thread::sleep(Duration::from_secs(5));
+            }
+        });
+        scanner_threads.push(scanner_handle);
+    }
+
+    if !scanner_threads.is_empty() {
+        THREAD_HANDLES.lock().unwrap().extend(scanner_threads);
+    }
+    log_event(LogLevel::Info, LogEvent::Initialization { status: "Feature initialization complete.".to_string() });
 }
 
 #[no_mangle]
 #[allow(non_snake_case)]
-pub extern "system" fn DllMain(
-    _dll_module: HINSTANCE,
-    call_reason: u32,
-    _reserved: *mut c_void,
-) -> BOOL {
-    match call_reason {
-        DLL_PROCESS_ATTACH => {
-            if dll_main_internal().is_err() {
-                return 0; // FALSE
-            }
+pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserved: *mut c_void) -> BOOL {
+    if call_reason == DLL_PROCESS_ATTACH {
+        let init_thread = thread::spawn(main_initialization_thread);
+        THREAD_HANDLES.lock().unwrap().push(init_thread);
+    } else if call_reason == DLL_PROCESS_DETACH {
+        SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
+        if let Some(sender) = LOG_SENDER.get() {
+            let _ = sender.send(None);
         }
-        DLL_PROCESS_DETACH => {
-            // Set the shutdown signal for all background threads.
-            SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-
-            log_event(
-                LogLevel::Info,
-                LogEvent::Shutdown {
-                    status: "Unloading monitor DLL.".to_string(),
-                },
-            );
-
-            // Signal the logging thread to shut down. We do not wait (`join`) for
-            // the threads here, as that can cause deadlocks inside DllMain.
-            // The OS will clean up the threads when the process terminates.
-            if let Some(sender) = LOG_SENDER.get() {
-                // This signals the logging thread to break its loop.
-                let _ = sender.send(None);
-            }
-        }
-        _ => {}
     }
-    1 // TRUE
+    1
 }
