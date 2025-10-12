@@ -1,4 +1,3 @@
-#![windows_subsystem = "windows"] // hide console window in all builds
 
 use chrono::{DateTime, Utc};
 use eframe::egui;
@@ -18,7 +17,7 @@ use widestring::{U16CString, U16String};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE},
     System::{
-        Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER},
+        Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory},
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW,
             Process32NextW, MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE,
@@ -26,7 +25,6 @@ use windows_sys::Win32::{
         },
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
         Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE},
-        SystemServices::IMAGE_DOS_HEADER,
         Threading::{
             CreateRemoteThread, OpenProcess, TerminateProcess, WaitForSingleObject,
             PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE,
@@ -47,6 +45,11 @@ pub struct MonitorConfig {
     pub string_dump_enabled: bool,
     pub vmp_dump_enabled: bool,
     pub manual_map_scan_enabled: bool,
+    pub network_hooks_enabled: bool,
+    pub registry_hooks_enabled: bool,
+    pub crypto_hooks_enabled: bool,
+    pub log_network_data: bool,
+    pub suspicion_threshold: u32,
 }
 
 impl Default for MonitorConfig {
@@ -57,6 +60,11 @@ impl Default for MonitorConfig {
             string_dump_enabled: false,
             vmp_dump_enabled: true,
             manual_map_scan_enabled: true,
+            network_hooks_enabled: true,
+            registry_hooks_enabled: true,
+            crypto_hooks_enabled: true,
+            log_network_data: false,
+            suspicion_threshold: 10,
         }
     }
 }
@@ -204,6 +212,12 @@ impl eframe::App for MyApp {
                 ui.checkbox(&mut self.monitor_config.vmp_dump_enabled, "VMP Dumper");
                 ui.end_row();
                 ui.checkbox(&mut self.monitor_config.manual_map_scan_enabled, "Manual Map Scans");
+                ui.checkbox(&mut self.monitor_config.network_hooks_enabled, "Network Hooks");
+                ui.end_row();
+                ui.checkbox(&mut self.monitor_config.registry_hooks_enabled, "Registry Hooks");
+                ui.checkbox(&mut self.monitor_config.crypto_hooks_enabled, "Crypto Hooks");
+                ui.end_row();
+                ui.checkbox(&mut self.monitor_config.log_network_data, "Log Network Data Payloads");
             });
             ui.separator();
 
@@ -421,20 +435,112 @@ fn find_process_id(target_process_name: &str) -> Option<u32> {
 }
 
 fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
-    let process_handle = unsafe { OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_SYNCHRONIZE, 0, pid) };
-    if process_handle == 0 { return Err(format!("OpenProcess failed: {}", unsafe { GetLastError() })); }
+    eprintln!("[DEBUG] Starting injection into PID: {}", pid);
+
+    let process_handle = unsafe {
+        eprintln!("[DEBUG] Before OpenProcess");
+        let handle = OpenProcess(
+            PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        );
+        eprintln!("[DEBUG] After OpenProcess: handle={:?}", handle);
+        handle
+    };
+
+    if process_handle == 0 {
+        let err = unsafe { GetLastError() };
+        eprintln!("[FATAL] OpenProcess failed with error: {}", err);
+        return Err(format!("OpenProcess failed: {}", err));
+    }
+
     let dll_path_wide = U16CString::from_os_str(dll_path).unwrap();
     let dll_path_len_bytes = (dll_path_wide.len() + 1) * 2;
-    let remote_buffer = unsafe { VirtualAllocEx(process_handle, std::ptr::null(), dll_path_len_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
-    if remote_buffer.is_null() { return Err(format!("VirtualAllocEx failed: {}", unsafe { GetLastError() })); }
-    if unsafe { WriteProcessMemory(process_handle, remote_buffer, dll_path_wide.as_ptr() as _, dll_path_len_bytes, &mut 0) } == 0 {
-        return Err(format!("WriteProcessMemory failed: {}", unsafe { GetLastError() }));
+
+    let remote_buffer = unsafe {
+        eprintln!("[DEBUG] Before VirtualAllocEx");
+        let buffer = VirtualAllocEx(
+            process_handle,
+            std::ptr::null(),
+            dll_path_len_bytes,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
+        eprintln!("[DEBUG] After VirtualAllocEx: buffer={:?}", buffer);
+        buffer
+    };
+
+    if remote_buffer.is_null() {
+        let err = unsafe { GetLastError() };
+        eprintln!("[FATAL] VirtualAllocEx failed with error: {}", err);
+        unsafe { CloseHandle(process_handle) };
+        return Err(format!("VirtualAllocEx failed: {}", err));
     }
-    let load_library_addr = unsafe { GetProcAddress(GetModuleHandleW(U16CString::from_str("kernel32.dll").unwrap().as_ptr()), b"LoadLibraryW\0".as_ptr()) };
-    if load_library_addr.is_none() { return Err("Could not find LoadLibraryW".into()); }
-    let thread_handle = unsafe { CreateRemoteThread(process_handle, std::ptr::null(), 0, Some(std::mem::transmute(load_library_addr)), remote_buffer as _, 0, std::ptr::null_mut()) };
-    if thread_handle == 0 { return Err(format!("CreateRemoteThread failed: {}", unsafe { GetLastError() })); }
+
+    let mut bytes_written = 0;
+    let write_success = unsafe {
+        eprintln!("[DEBUG] Before WriteProcessMemory");
+        let success = WriteProcessMemory(
+            process_handle,
+            remote_buffer,
+            dll_path_wide.as_ptr() as _,
+            dll_path_len_bytes,
+            &mut bytes_written,
+        );
+        eprintln!("[DEBUG] After WriteProcessMemory: success={}, bytes_written={}", success, bytes_written);
+        success
+    };
+
+    if write_success == 0 {
+        let err = unsafe { GetLastError() };
+        eprintln!("[FATAL] WriteProcessMemory failed with error: {}", err);
+        // TODO: Free remote_buffer
+        unsafe { CloseHandle(process_handle) };
+        return Err(format!("WriteProcessMemory failed: {}", err));
+    }
+
+    let kernel32_name = U16CString::from_str("kernel32.dll").unwrap();
+    let load_library_addr = unsafe {
+        eprintln!("[DEBUG] Before GetProcAddress for LoadLibraryW");
+        let addr = GetProcAddress(GetModuleHandleW(kernel32_name.as_ptr()), b"LoadLibraryW\0".as_ptr());
+        eprintln!("[DEBUG] After GetProcAddress: addr={:?}", addr);
+        addr
+    };
+
+    if load_library_addr.is_none() {
+        let err = unsafe { GetLastError() };
+        eprintln!("[FATAL] GetProcAddress for LoadLibraryW failed with error: {}", err);
+        // TODO: Free remote_buffer
+        unsafe { CloseHandle(process_handle) };
+        return Err("Could not find LoadLibraryW".into());
+    }
+
+    let thread_handle = unsafe {
+        eprintln!("[DEBUG] Before CreateRemoteThread");
+        let handle = CreateRemoteThread(
+            process_handle,
+            std::ptr::null(),
+            0,
+            Some(std::mem::transmute(load_library_addr)),
+            remote_buffer as _,
+            0,
+            std::ptr::null_mut(),
+        );
+        eprintln!("[DEBUG] After CreateRemoteThread: handle={:?}", handle);
+        handle
+    };
+
+    if thread_handle == 0 {
+        let err = unsafe { GetLastError() };
+        eprintln!("[FATAL] CreateRemoteThread failed with error: {}", err);
+        // TODO: Free remote_buffer
+        unsafe { CloseHandle(process_handle) };
+        return Err(format!("CreateRemoteThread failed: {}", err));
+    }
+
+    eprintln!("[DEBUG] Injection thread created successfully. Closing remote thread handle.");
     unsafe { CloseHandle(thread_handle) };
+    eprintln!("[DEBUG] Injection seems successful. Returning process handle.");
     Ok(process_handle)
 }
 
@@ -484,7 +590,53 @@ fn dump_module_from_process(process_handle: isize, module: &ModuleInfo, logger: 
     }
 }
 
+fn cli_run(pid: u32) -> Result<(), String> {
+    println!("CLI mode: Attempting to inject into PID {}", pid);
+
+    let dll_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join(DLL_NAME)))
+        .filter(|p| p.exists());
+
+    let Some(dll_path) = dll_path else {
+        return Err("monitor_lib.dll not found in the same directory as the executable.".to_string());
+    };
+
+    println!("Found DLL at: {}", dll_path.display());
+
+    match inject_dll(pid, &dll_path) {
+        Ok(handle) => {
+            println!("Injection successful. Process handle: {:?}", handle);
+            // In CLI mode, we might just exit, or wait for the process to terminate.
+            // For now, we'll just exit.
+            unsafe { CloseHandle(handle) };
+            Ok(())
+        }
+        Err(e) => {
+            Err(format!("Injection failed: {}", e))
+        }
+    }
+}
+
 fn main() -> Result<(), eframe::Error> {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pid_index) = args.iter().position(|arg| arg == "--pid") {
+        if let Some(pid_str) = args.get(pid_index + 1) {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                // Allocate a console for debug output in CLI mode
+                unsafe { windows_sys::Win32::System::Console::AllocConsole() };
+                match cli_run(pid) {
+                    Ok(_) => println!("CLI operation completed successfully."),
+                    Err(e) => eprintln!("CLI operation failed: {}", e),
+                }
+                // Give time for user to see output
+                thread::sleep(Duration::from_secs(5));
+                return Ok(());
+            }
+        }
+    }
+
+    // Default to GUI mode if no valid CLI args are provided
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([700.0, 900.0]),
         ..Default::default()

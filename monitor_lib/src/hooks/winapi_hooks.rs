@@ -6,7 +6,6 @@ use once_cell::sync::Lazy;
 use std::sync::atomic::Ordering;
 use retour::static_detour;
 use serde_json::json;
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::slice;
 use std::sync::Mutex;
@@ -19,16 +18,23 @@ use widestring::U16CStr;
 
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND};
 use windows_sys::Win32::Networking::WinSock::{
-    inet_ntoa, ADDRINFOW, AF_INET, IN_ADDR, SOCKADDR, SOCKADDR_IN, SOCKET,
+    inet_ntoa, ADDRINFOW, AF_INET, IN_ADDR, SOCKADDR, SOCKADDR_IN, SOCKET, WSABUF,
 };
-use windows_sys::Win32::Security::Cryptography::{CryptDecrypt, CryptEncrypt};
+use windows_sys::Win32::Networking::WinInet::{
+    InternetOpenW, InternetConnectW, HttpOpenRequestW, InternetReadFile
+};
+use windows_sys::Win32::Security::Cryptography::{CertVerifyCertificateChainPolicy, CryptHashData, HCRYPTPROV_OR_NCRYPT_KEY_HANDLE};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, DeleteFileW, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    CreateFileW, DeleteFileW, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE, CopyFileW, MoveFileW, GetTempPathW, GetTempFileNameW, FindFirstFileW, FindNextFileW,
 };
+use windows_sys::Win32::System::Threading::{
+    CreateProcessA, QueueUserAPC, WinExec,
+};
+use windows_sys::Win32::UI::Shell::{ShellExecuteExW, ShellExecuteW};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, CheckRemoteDebuggerPresent, IsDebuggerPresent,
-    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory, OutputDebugStringA,
+    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory, OutputDebugStringA, SetThreadContext,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -37,9 +43,9 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LoadLibraryExW, LoadLibraryW,
 };
-use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, PAGE_EXECUTE_READWRITE};
+use windows_sys::Win32::System::Memory::VirtualAllocEx;
 use windows_sys::Win32::System::Registry::{
-    RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY,
+    RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY, RegOpenKeyExW, RegQueryValueExW, RegEnumKeyExW, RegEnumValueW
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, CreateRemoteThread, CreateThread, ExitProcess, OpenProcess,
@@ -146,6 +152,10 @@ static_detour! {
         HKEY, *const u16, u32, u32, *const u8, u32
     ) -> u32;
     pub static RegDeleteKeyWHook: unsafe extern "system" fn(HKEY, *const u16) -> u32;
+    pub static RegOpenKeyExWHook: unsafe extern "system" fn(HKEY, *const u16, u32, u32, *mut HKEY) -> u32;
+    pub static RegQueryValueExWHook: unsafe extern "system" fn(HKEY, *const u16, *const u32, *mut u32, *mut u8, *mut u32) -> u32;
+    pub static RegEnumKeyExWHook: unsafe extern "system" fn(HKEY, u32, *mut u16, *mut u32, *const u32, *mut u16, *mut u32, *mut windows_sys::Win32::Foundation::FILETIME) -> u32;
+    pub static RegEnumValueWHook: unsafe extern "system" fn(HKEY, u32, *mut u16, *mut u32, *const u32, *mut u32, *mut u8, *mut u32) -> u32;
     pub static DeleteFileWHook: unsafe extern "system" fn(*const u16) -> BOOL;
     pub static CreateRemoteThreadHook: unsafe extern "system" fn(
         HANDLE, *const SECURITY_ATTRIBUTES, usize, LPTHREAD_START_ROUTINE, *const c_void, THREAD_CREATION_FLAGS, *mut u32
@@ -178,7 +188,40 @@ static_detour! {
     pub static CryptDecryptHook: unsafe extern "system" fn(
         HCRYPTKEY, HCRYPTHASH, BOOL, u32, *mut u8, *mut u32
     ) -> BOOL;
+
+    // C2 Detection Hooks
+    pub static WSASendHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, u32, *mut OVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE) -> i32;
+    pub static WSARecvHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, *mut u32, *mut OVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE) -> i32;
+    pub static SendHook: unsafe extern "system" fn(SOCKET, *const u8, i32, i32) -> i32;
+    pub static RecvHook: unsafe extern "system" fn(SOCKET, *mut u8, i32, i32) -> i32;
+    pub static InternetOpenWHook: unsafe extern "system" fn(*const u16, u32, *const u16, *const u16, u32) -> HINTERNET;
+    pub static InternetConnectWHook: unsafe extern "system" fn(HINTERNET, *const u16, u16, *const u16, *const u16, u32, u32, usize) -> HINTERNET;
+    pub static HttpOpenRequestWHook: unsafe extern "system" fn(HINTERNET, *const u16, *const u16, *const u16, *const u16, *const *const u16, u32, usize) -> HINTERNET;
+    pub static InternetReadFileHook: unsafe extern "system" fn(HINTERNET, *mut c_void, u32, *mut u32) -> BOOL;
+    pub static DnsQuery_AHook: unsafe extern "system" fn(*const u8, u16, u32, *const c_void, *mut *mut c_void, *mut *mut c_void) -> NTSTATUS;
+    pub static DnsQuery_WHook: unsafe extern "system" fn(*const u16, u16, u32, *const c_void, *mut *mut c_void, *mut *mut c_void) -> NTSTATUS;
+    pub static CertVerifyCertificateChainPolicyHook: unsafe extern "system" fn(i32, *const c_void, *const c_void, *mut c_void) -> BOOL;
+    pub static CryptHashDataHook: unsafe extern "system" fn(HCRYPTHASH, *const u8, u32, u32) -> BOOL;
+
+    // Broader Feature Hooks
+    pub static CopyFileWHook: unsafe extern "system" fn(*const u16, *const u16, BOOL) -> BOOL;
+    pub static MoveFileWHook: unsafe extern "system" fn(*const u16, *const u16) -> BOOL;
+    pub static GetTempPathWHook: unsafe extern "system" fn(u32, *mut u16) -> u32;
+    pub static GetTempFileNameWHook: unsafe extern "system" fn(*const u16, *const u16, u32, *mut u16) -> u32;
+    pub static FindFirstFileWHook: unsafe extern "system" fn(*const u16, *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> HANDLE;
+    pub static FindNextFileWHook: unsafe extern "system" fn(HANDLE, *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> BOOL;
+    pub static NtCreateThreadExHook: unsafe extern "system" fn(*mut HANDLE, u32, *const c_void, HANDLE, *const c_void, *const c_void, BOOL, usize, usize, usize, *const c_void) -> NTSTATUS;
+    pub static QueueUserAPCHook: unsafe extern "system" fn(Option<unsafe extern "system" fn(usize)>, HANDLE, usize) -> u32;
+    pub static SetThreadContextHook: unsafe extern "system" fn(HANDLE, *const windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> BOOL;
+    pub static WinExecHook: unsafe extern "system" fn(*const u8, u32) -> u32;
+    pub static SystemHook: unsafe extern "system" fn(*const i8) -> i32;
+    pub static ShellExecuteWHook: unsafe extern "system" fn(HWND, *const u16, *const u16, *const u16, *const u16, i32) -> HINSTANCE;
+    pub static ShellExecuteExWHook: unsafe extern "system" fn(*mut c_void) -> BOOL;
+    pub static CreateProcessAHook: unsafe extern "system" fn(*const u8, *mut u8, *const SECURITY_ATTRIBUTES, *const SECURITY_ATTRIBUTES, BOOL, u32, *const c_void, *const u8, *const windows_sys::Win32::System::Threading::STARTUPINFOA, *mut PROCESS_INFORMATION) -> BOOL;
 }
+
+// Type definitions for function pointers and structs that might be missing or complex.
+type LPWSAOVERLAPPED_COMPLETION_ROUTINE = Option<unsafe extern "system" fn(u32, u32, *mut OVERLAPPED, u32)>;
 
 pub fn hooked_is_debugger_present() -> BOOL {
     let should_log = {
@@ -740,6 +783,136 @@ fn hkey_to_string(hkey: HKEY) -> String {
     }
 }
 
+fn check_persistence_key(full_key_path: &str) {
+    let persistence_keys = [
+        r"Software\Microsoft\Windows\CurrentVersion\Run",
+        r"Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        r"SYSTEM\CurrentControlSet\Services",
+        r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Userinit",
+        r"Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Shell",
+    ];
+
+    for key in persistence_keys.iter() {
+        if full_key_path.contains(key) {
+            SUSPICION_SCORE.fetch_add(20, Ordering::Relaxed);
+            log_event(
+                LogLevel::Warn,
+                LogEvent::ApiHook {
+                    function_name: "RegistryPersistence".to_string(),
+                    parameters: json!({
+                        "key_path": full_key_path,
+                        "note": "Suspicious registry key access related to persistence."
+                    }),
+                    stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+                },
+            );
+            break;
+        }
+    }
+}
+
+pub unsafe fn hooked_reg_open_key_ex_w(
+    hkey: HKEY,
+    lp_sub_key: *const u16,
+    ul_options: u32,
+    sam_desired: u32,
+    phk_result: *mut HKEY,
+) -> u32 {
+    let sub_key = safe_u16_str(lp_sub_key);
+    let full_path = format!("{}\\{}", hkey_to_string(hkey), sub_key);
+    check_persistence_key(&full_path);
+
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Debug,
+            LogEvent::ApiHook {
+                function_name: "RegOpenKeyExW".to_string(),
+                parameters: json!({ "path": full_path }),
+                stack_trace: None,
+            },
+        );
+    }
+    RegOpenKeyExWHook.call(hkey, lp_sub_key, ul_options, sam_desired, phk_result)
+}
+
+pub unsafe fn hooked_reg_query_value_ex_w(
+    hkey: HKEY,
+    lp_value_name: *const u16,
+    lp_reserved: *const u32,
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+) -> u32 {
+    let value_name = safe_u16_str(lp_value_name);
+    // It's hard to get the full key path here without more complex tracking,
+    // so we'll just log the value name.
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Debug,
+            LogEvent::ApiHook {
+                function_name: "RegQueryValueExW".to_string(),
+                parameters: json!({ "value_name": value_name }),
+                stack_trace: None,
+            },
+        );
+    }
+    RegQueryValueExWHook.call(hkey, lp_value_name, lp_reserved, lp_type, lp_data, lpcb_data)
+}
+
+pub unsafe fn hooked_reg_enum_key_ex_w(
+    hkey: HKEY,
+    dw_index: u32,
+    lp_name: *mut u16,
+    lpcch_name: *mut u32,
+    lp_reserved: *const u32,
+    lp_class: *mut u16,
+    lpcch_class: *mut u32,
+    lpft_last_write_time: *mut windows_sys::Win32::Foundation::FILETIME,
+) -> u32 {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Debug,
+            LogEvent::ApiHook {
+                function_name: "RegEnumKeyExW".to_string(),
+                parameters: json!({
+                    "hkey": hkey_to_string(hkey),
+                    "index": dw_index,
+                    "note": "Enumerating registry keys."
+                }),
+                stack_trace: None,
+            },
+        );
+    }
+    RegEnumKeyExWHook.call(hkey, dw_index, lp_name, lpcch_name, lp_reserved, lp_class, lpcch_class, lpft_last_write_time)
+}
+
+pub unsafe fn hooked_reg_enum_value_w(
+    hkey: HKEY,
+    dw_index: u32,
+    lp_value_name: *mut u16,
+    lpcch_value_name: *mut u32,
+    lp_reserved: *const u32,
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+) -> u32 {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Debug,
+            LogEvent::ApiHook {
+                function_name: "RegEnumValueW".to_string(),
+                parameters: json!({
+                    "hkey": hkey_to_string(hkey),
+                    "index": dw_index,
+                    "note": "Enumerating registry values."
+                }),
+                stack_trace: None,
+            },
+        );
+    }
+    RegEnumValueWHook.call(hkey, dw_index, lp_value_name, lpcch_value_name, lp_reserved, lp_type, lp_data, lpcb_data)
+}
+
 pub fn hooked_reg_create_key_ex_w(
     hkey: HKEY,
     lp_sub_key: *const u16,
@@ -957,6 +1130,515 @@ pub unsafe fn hooked_virtual_alloc_ex(
     }
 
     result
+}
+
+// --- C2 Detection Hook Implementations ---
+
+pub unsafe fn hooked_wsasend(
+    s: SOCKET,
+    lp_buffers: *const WSABUF,
+    dw_buffer_count: u32,
+    lp_number_of_bytes_sent: *mut u32,
+    dw_flags: u32,
+    lp_overlapped: *mut OVERLAPPED,
+    lp_completion_routine: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+) -> i32 {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        let mut total_len = 0;
+        let mut data_preview = String::from("<disabled>");
+        if !lp_buffers.is_null() && dw_buffer_count > 0 {
+            let buffers = slice::from_raw_parts(lp_buffers, dw_buffer_count as usize);
+            for buffer in buffers {
+                total_len += buffer.len;
+            }
+            if CONFIG.features.get().map_or(false, |f| f.log_network_data) {
+                data_preview.clear();
+                for buffer in buffers {
+                    if data_preview.len() < 256 { // Limit preview size
+                        data_preview.push_str(&format_buffer_preview(buffer.buf, buffer.len));
+                    }
+                }
+            }
+        }
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "WSASend".to_string(),
+                parameters: json!({
+                    "socket": s,
+                    "buffer_count": dw_buffer_count,
+                    "total_size": total_len,
+                    "data_hex": data_preview,
+                    "direction": "send"
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    WSASendHook.call(s, lp_buffers, dw_buffer_count, lp_number_of_bytes_sent, dw_flags, lp_overlapped, lp_completion_routine)
+}
+
+pub unsafe fn hooked_send(s: SOCKET, buf: *const u8, len: i32, flags: i32) -> i32 {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        let data_preview = if CONFIG.features.get().map_or(false, |f| f.log_network_data) {
+            format_buffer_preview(buf, len as u32)
+        } else {
+            "<disabled>".to_string()
+        };
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "send".to_string(),
+                parameters: json!({
+                    "socket": s,
+                    "size": len,
+                    "data_hex": data_preview,
+                    "direction": "send"
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    SendHook.call(s, buf, len, flags)
+}
+
+pub unsafe fn hooked_internet_open_w(
+    lpsz_agent: *const u16,
+    dw_access_type: u32,
+    lpsz_proxy: *const u16,
+    lpsz_proxy_bypass: *const u16,
+    dw_flags: u32,
+) -> HINTERNET {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "InternetOpenW".to_string(),
+                parameters: json!({
+                    "user_agent": safe_u16_str(lpsz_agent),
+                    "proxy": safe_u16_str(lpsz_proxy),
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    InternetOpenWHook.call(lpsz_agent, dw_access_type, lpsz_proxy, lpsz_proxy_bypass, dw_flags)
+}
+
+pub unsafe fn hooked_dns_query_w(
+    psz_name: *const u16,
+    w_type: u16,
+    options: u32,
+    p_extra: *const c_void,
+    pp_query_results: *mut *mut c_void,
+    p_reserved: *mut *mut c_void,
+) -> NTSTATUS {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        let hostname = safe_u16_str(psz_name);
+        // Basic check against a list of known bad domains.
+        if hostname.contains("bad-domain.com") {
+             SUSPICION_SCORE.fetch_add(50, Ordering::Relaxed);
+        }
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "DnsQuery_W".to_string(),
+                parameters: json!({ "hostname": hostname }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    DnsQuery_WHook.call(psz_name, w_type, options, p_extra, pp_query_results, p_reserved)
+}
+
+pub unsafe fn hooked_cert_verify_certificate_chain_policy(
+    psz_policy_oid: i32,
+    p_chain_context: *const c_void,
+    p_policy_para: *const c_void,
+    p_policy_status: *mut c_void,
+) -> BOOL {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "CertVerifyCertificateChainPolicy".to_string(),
+                parameters: json!({
+                    "policy_oid": psz_policy_oid,
+                    "note": "SSL/TLS certificate chain validation occurred. Could be used for SSL pinning checks."
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    CertVerifyCertificateChainPolicyHook.call(psz_policy_oid, p_chain_context, p_policy_para, p_policy_status)
+}
+
+pub unsafe fn hooked_internet_connect_w(
+    h_internet: HINTERNET,
+    lpsz_server_name: *const u16,
+    n_server_port: u16,
+    lpsz_user_name: *const u16,
+    lpsz_password: *const u16,
+    dw_service: u32,
+    dw_flags: u32,
+    dw_context: usize,
+) -> HINTERNET {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "InternetConnectW".to_string(),
+                parameters: json!({
+                    "target_host": safe_u16_str(lpsz_server_name),
+                    "port": n_server_port,
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    InternetConnectWHook.call(h_internet, lpsz_server_name, n_server_port, lpsz_user_name, lpsz_password, dw_service, dw_flags, dw_context)
+}
+
+pub unsafe fn hooked_http_open_request_w(
+    h_connect: HINTERNET,
+    lpsz_verb: *const u16,
+    lpsz_object_name: *const u16,
+    lpsz_version: *const u16,
+    lpsz_referrer: *const u16,
+    lplpsz_accept_types: *const *const u16,
+    dw_flags: u32,
+    dw_context: usize,
+) -> HINTERNET {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "HttpOpenRequestW".to_string(),
+                parameters: json!({
+                    "verb": safe_u16_str(lpsz_verb),
+                    "path": safe_u16_str(lpsz_object_name),
+                    "version": safe_u16_str(lpsz_version),
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    HttpOpenRequestWHook.call(h_connect, lpsz_verb, lpsz_object_name, lpsz_version, lpsz_referrer, lplpsz_accept_types, dw_flags, dw_context)
+}
+
+pub unsafe fn hooked_internet_read_file(
+    h_file: HINTERNET,
+    lp_buffer: *mut c_void,
+    dw_number_of_bytes_to_read: u32,
+    lp_dw_number_of_bytes_read: *mut u32,
+) -> BOOL {
+    let result = InternetReadFileHook.call(h_file, lp_buffer, dw_number_of_bytes_to_read, lp_dw_number_of_bytes_read);
+    if result != 0 && !lp_dw_number_of_bytes_read.is_null() && *lp_dw_number_of_bytes_read > 0 {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            log_event(
+                LogLevel::Info,
+                LogEvent::ApiHook {
+                    function_name: "InternetReadFile".to_string(),
+                    parameters: json!({
+                        "bytes_read": *lp_dw_number_of_bytes_read,
+                        "data_preview": format_buffer_preview(lp_buffer as *const u8, *lp_dw_number_of_bytes_read),
+                        "direction": "receive",
+                    }),
+                    stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+                },
+            );
+        }
+    }
+    result
+}
+
+pub unsafe fn hooked_dns_query_a(
+    psz_name: *const u8,
+    w_type: u16,
+    options: u32,
+    p_extra: *const c_void,
+    pp_query_results: *mut *mut c_void,
+    p_reserved: *mut *mut c_void,
+) -> NTSTATUS {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        let hostname = safe_u8_str(psz_name);
+        if hostname.contains("bad-domain.com") {
+             SUSPICION_SCORE.fetch_add(50, Ordering::Relaxed);
+        }
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "DnsQuery_A".to_string(),
+                parameters: json!({ "hostname": hostname }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    DnsQuery_AHook.call(psz_name, w_type, options, p_extra, pp_query_results, p_reserved)
+}
+
+pub unsafe fn hooked_crypt_hash_data(
+    h_hash: HCRYPTHASH,
+    pb_data: *const u8,
+    dw_data_len: u32,
+    dw_flags: u32,
+) -> BOOL {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "CryptHashData".to_string(),
+                parameters: json!({
+                    "data_len": dw_data_len,
+                    "data_preview": format_buffer_preview(pb_data, dw_data_len),
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    CryptHashDataHook.call(h_hash, pb_data, dw_data_len, dw_flags)
+}
+
+// --- Broader Feature Hook Implementations ---
+
+pub unsafe fn hooked_copy_file_w(lp_existing_file_name: *const u16, lp_new_file_name: *const u16, b_fail_if_exists: BOOL) -> BOOL {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "CopyFileW".to_string(),
+                parameters: json!({
+                    "source": safe_u16_str(lp_existing_file_name),
+                    "destination": safe_u16_str(lp_new_file_name),
+                }),
+                stack_trace: None,
+            },
+        );
+    }
+    CopyFileWHook.call(lp_existing_file_name, lp_new_file_name, b_fail_if_exists)
+}
+
+pub unsafe fn hooked_get_temp_path_w(n_buffer_length: u32, lp_buffer: *mut u16) -> u32 {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "GetTempPathW".to_string(),
+                parameters: json!({"note": "Code is attempting to find the temporary directory."}),
+                stack_trace: None,
+            },
+        );
+    }
+    GetTempPathWHook.call(n_buffer_length, lp_buffer)
+}
+
+pub unsafe fn hooked_find_first_file_w(lp_file_name: *const u16, lp_find_file_data: *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> HANDLE {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "FindFirstFileW".to_string(),
+                parameters: json!({
+                    "pattern": safe_u16_str(lp_file_name),
+                    "note": "File/directory enumeration started."
+                }),
+                stack_trace: None,
+            },
+        );
+    }
+    FindFirstFileWHook.call(lp_file_name, lp_find_file_data)
+}
+
+pub unsafe fn hooked_queue_user_apc(pfn_apc: Option<unsafe extern "system" fn(usize)>, h_thread: HANDLE, dw_data: usize) -> u32 {
+    SUSPICION_SCORE.fetch_add(15, Ordering::Relaxed);
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "QueueUserAPC".to_string(),
+                parameters: json!({
+                    "apc_routine": pfn_apc.map_or(0, |f| f as usize),
+                    "thread_handle": h_thread as usize,
+                    "note": "APC injection attempt detected."
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    QueueUserAPCHook.call(pfn_apc, h_thread, dw_data)
+}
+
+pub unsafe fn hooked_win_exec(lp_cmd_line: *const u8, u_cmd_show: u32) -> u32 {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "WinExec".to_string(),
+                parameters: json!({ "command_line": safe_u8_str(lp_cmd_line) }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    WinExecHook.call(lp_cmd_line, u_cmd_show)
+}
+
+pub unsafe fn hooked_create_process_a(
+    lp_application_name: *const u8,
+    lp_command_line: *mut u8,
+    lp_process_attributes: *const SECURITY_ATTRIBUTES,
+    lp_thread_attributes: *const SECURITY_ATTRIBUTES,
+    b_inherit_handles: BOOL,
+    dw_creation_flags: u32,
+    lp_environment: *const c_void,
+    lp_current_directory: *const u8,
+    lp_startup_info: *const windows_sys::Win32::System::Threading::STARTUPINFOA, // Simplified for logging
+    lp_process_information: *mut PROCESS_INFORMATION,
+) -> BOOL {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        let app_name = safe_u8_str(lp_application_name);
+        let cmd_line = safe_u8_str(lp_command_line);
+        if app_name.contains("cmd.exe") || app_name.contains("powershell.exe") ||
+           cmd_line.contains("cmd.exe") || cmd_line.contains("powershell.exe") {
+            SUSPICION_SCORE.fetch_add(25, Ordering::Relaxed);
+        }
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "CreateProcessA".to_string(),
+                parameters: json!({ "application_name": app_name, "command_line": cmd_line }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    CreateProcessAHook.call(lp_application_name, lp_command_line, lp_process_attributes, lp_thread_attributes, b_inherit_handles, dw_creation_flags, lp_environment, lp_current_directory, lp_startup_info, lp_process_information)
+}
+
+pub unsafe fn hooked_move_file_w(lp_existing_file_name: *const u16, lp_new_file_name: *const u16) -> BOOL {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Info,
+            LogEvent::ApiHook {
+                function_name: "MoveFileW".to_string(),
+                parameters: json!({
+                    "from": safe_u16_str(lp_existing_file_name),
+                    "to": safe_u16_str(lp_new_file_name),
+                }),
+                stack_trace: None,
+            },
+        );
+    }
+    MoveFileWHook.call(lp_existing_file_name, lp_new_file_name)
+}
+
+pub unsafe fn hooked_get_temp_file_name_w(lp_path_name: *const u16, lp_prefix_string: *const u16, u_unique: u32, lp_temp_file_name: *mut u16) -> u32 {
+    let result = GetTempFileNameWHook.call(lp_path_name, lp_prefix_string, u_unique, lp_temp_file_name);
+    if result != 0 {
+        if let Some(_guard) = ReentrancyGuard::new() {
+            log_event(
+                LogLevel::Info,
+                LogEvent::ApiHook {
+                    function_name: "GetTempFileNameW".to_string(),
+                    parameters: json!({ "path": safe_u16_str(lp_path_name), "prefix": safe_u16_str(lp_prefix_string) }),
+                    stack_trace: None,
+                },
+            );
+        }
+    }
+    result
+}
+
+pub unsafe fn hooked_find_next_file_w(h_find_file: HANDLE, lp_find_file_data: *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> BOOL {
+    // This function is often called in a tight loop. To avoid log spam, we don't log it by default.
+    // The initial FindFirstFileW call is usually sufficient to indicate enumeration.
+    FindNextFileWHook.call(h_find_file, lp_find_file_data)
+}
+
+pub unsafe fn hooked_nt_create_thread_ex(
+    ph_thread: *mut HANDLE,
+    desired_access: u32,
+    object_attributes: *const c_void,
+    process_handle: HANDLE,
+    start_routine: *const c_void,
+    argument: *const c_void,
+    create_suspended: BOOL,
+    stack_zero_bits: usize,
+    size_of_stack_commit: usize,
+    size_of_stack_reserve: usize,
+    bytes_buffer: *const c_void,
+) -> NTSTATUS {
+    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "NtCreateThreadEx".to_string(),
+                parameters: json!({
+                    "process_handle": process_handle as usize,
+                    "start_address": start_routine as usize,
+                    "note": "Low-level thread creation detected."
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    NtCreateThreadExHook.call(ph_thread, desired_access, object_attributes, process_handle, start_routine, argument, create_suspended, stack_zero_bits, size_of_stack_commit, size_of_stack_reserve, bytes_buffer)
+}
+
+pub unsafe fn hooked_set_thread_context(h_thread: HANDLE, lp_context: *const windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> BOOL {
+    SUSPICION_SCORE.fetch_add(15, Ordering::Relaxed);
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "SetThreadContext".to_string(),
+                parameters: json!({
+                    "thread_handle": h_thread as usize,
+                    "note": "Thread hijacking attempt detected."
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    SetThreadContextHook.call(h_thread, lp_context)
+}
+
+pub unsafe fn hooked_system(command: *const i8) -> i32 {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "system".to_string(),
+                parameters: json!({ "command": safe_u8_str(command as *const u8) }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    SystemHook.call(command)
+}
+
+pub unsafe fn hooked_shell_execute_w(
+    hwnd: HWND,
+    lp_operation: *const u16,
+    lp_file: *const u16,
+    lp_parameters: *const u16,
+    lp_directory: *const u16,
+    n_show_cmd: i32,
+) -> HINSTANCE {
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "ShellExecuteW".to_string(),
+                parameters: json!({
+                    "operation": safe_u16_str(lp_operation),
+                    "file": safe_u16_str(lp_file),
+                    "parameters": safe_u16_str(lp_parameters),
+                }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
+    }
+    ShellExecuteWHook.call(hwnd, lp_operation, lp_file, lp_parameters, lp_directory, n_show_cmd)
 }
 
 pub fn hooked_create_remote_thread(
@@ -1234,27 +1916,25 @@ pub unsafe fn hooked_crypt_decrypt(
     result
 }
 
+use crate::debug_log;
+
 macro_rules! hook {
     ($hook:ident, $func:expr, $hook_fn:expr) => {
         let func_name = stringify!($func);
-        $hook
-            .initialize($func, $hook_fn)
-            .and_then(|_| $hook.enable())
-            .map_err(|e| {
-                let msg = format!("Failed to hook {}: {}", func_name, e);
-                log_event(
-                    LogLevel::Error,
-                    LogEvent::Error {
-                        source: "Initialization".to_string(),
-                        message: msg.clone(),
-                    },
-                );
-                msg
-            })?
+        if let Err(e) = $hook.initialize($func, $hook_fn).and_then(|_| $hook.enable()) {
+            log_event(
+                LogLevel::Error,
+                LogEvent::Error {
+                    source: "StaticHook".to_string(),
+                    message: format!("Failed to hook {}: {}", func_name, e),
+                },
+            );
+            // Do not return an error, just log it and continue.
+        }
     };
 }
 
-pub unsafe fn initialize_all_hooks() -> Result<(), String> {
+pub unsafe fn initialize_all_hooks() {
     // Hook critical process termination functions.
     let exit_process_ptr: unsafe extern "system" fn(u32) -> ! =
         std::mem::transmute(ExitProcess as *const ());
@@ -1336,19 +2016,38 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
     hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
     hook!(LoadLibraryExWHook, LoadLibraryExW, hooked_load_library_ex_w);
 
-    // Hook registry functions.
-    hook!(
-        RegCreateKeyExWHook,
-        RegCreateKeyExW,
-        hooked_reg_create_key_ex_w
-    );
-    hook!(
-        RegSetValueExWHook,
-        RegSetValueExW,
-        hooked_reg_set_value_ex_w
-    );
-    hook!(RegDeleteKeyWHook, RegDeleteKeyW, hooked_reg_delete_key_w);
-    hook!(DeleteFileWHook, DeleteFileW, hooked_delete_file_w);
+    if CONFIG.features.get().map_or(false, |f| f.registry_hooks_enabled) {
+        // Hook registry functions.
+        hook!(
+            RegCreateKeyExWHook,
+            RegCreateKeyExW,
+            |a, b, c, d, e, f, g, h, i| hooked_reg_create_key_ex_w(a, b, c, d, e, f, g, h, i)
+        );
+        hook!(
+            RegSetValueExWHook,
+            RegSetValueExW,
+            |a, b, c, d, e, f| hooked_reg_set_value_ex_w(a, b, c, d, e, f)
+        );
+        hook!(RegDeleteKeyWHook, RegDeleteKeyW, |a, b| hooked_reg_delete_key_w(a, b));
+        hook!(RegOpenKeyExWHook, RegOpenKeyExW, |a, b, c, d, e| hooked_reg_open_key_ex_w(a, b, c, d, e));
+        hook!(RegQueryValueExWHook, RegQueryValueExW, |a, b, c, d, e, f| hooked_reg_query_value_ex_w(a, b, c, d, e, f));
+        hook!(RegEnumKeyExWHook, RegEnumKeyExW, |a, b, c, d, e, f, g, h| hooked_reg_enum_key_ex_w(a, b, c, d, e, f, g, h));
+        hook!(RegEnumValueWHook, RegEnumValueW, |a, b, c, d, e, f, g, h| hooked_reg_enum_value_w(a, b, c, d, e, f, g, h));
+    }
+    hook!(DeleteFileWHook, DeleteFileW, |a| hooked_delete_file_w(a));
+
+    // Broader Feature Hooks
+    hook!(CopyFileWHook, CopyFileW, |a, b, c| hooked_copy_file_w(a, b, c));
+    hook!(MoveFileWHook, MoveFileW, |a, b| hooked_move_file_w(a, b));
+    hook!(GetTempPathWHook, GetTempPathW, |a, b| hooked_get_temp_path_w(a, b));
+    hook!(GetTempFileNameWHook, GetTempFileNameW, |a, b, c, d| hooked_get_temp_file_name_w(a, b, c, d));
+    hook!(FindFirstFileWHook, FindFirstFileW, |a, b| hooked_find_first_file_w(a, b));
+    hook!(FindNextFileWHook, FindNextFileW, |a, b| hooked_find_next_file_w(a, b));
+    hook!(QueueUserAPCHook, QueueUserAPC, |a, b, c| hooked_queue_user_apc(a, b, c));
+    hook!(SetThreadContextHook, SetThreadContext, |a, b| hooked_set_thread_context(a, b));
+    hook!(WinExecHook, WinExec, |a, b| hooked_win_exec(a, b));
+    hook!(ShellExecuteWHook, ShellExecuteW, |a, b, c, d, e, f| hooked_shell_execute_w(a, b, c, d, e, f));
+    hook!(CreateProcessAHook, CreateProcessA, |a, b, c, d, e, f, g, h, i, j| hooked_create_process_a(a, b, c, d, e, f, g, h, i, j));
 
     // Hook thread creation.
     hook!(
@@ -1367,115 +2066,92 @@ pub unsafe fn initialize_all_hooks() -> Result<(), String> {
         |a, b| hooked_add_vectored_exception_handler(a, b)
     );
 
-    initialize_dynamic_hooks()?;
-
-    Ok(())
+    initialize_dynamic_hooks();
 }
 
-unsafe fn initialize_dynamic_hooks() -> Result<(), String> {
-    macro_rules! hook {
-        ($hook:ident, $func:expr, $hook_fn:expr) => {
-            let func_name = stringify!($func);
-            $hook
-                .initialize($func, $hook_fn)
-                .and_then(|_| $hook.enable())
-                .map_err(|e| {
-                    let msg = format!("Failed to hook {}: {}", func_name, e);
-                    log_event(
-                        LogLevel::Error,
+unsafe fn initialize_dynamic_hooks() {
+    macro_rules! dyn_hook {
+        ($hook:ident, $lib:expr, $func:expr, $hook_fn:expr) => {
+            let lib_name_str = $lib;
+            let func_name_str = stringify!($func);
+            let lib_name: Vec<u16> = lib_name_str.encode_utf16().chain(std::iter::once(0)).collect();
+            let lib_handle = GetModuleHandleW(lib_name.as_ptr());
+
+            if lib_handle != 0 {
+                if let Some(addr) = GetProcAddress(lib_handle, $func.as_ptr() as *const u8) {
+                    let typed_addr = std::mem::transmute(addr);
+                    if let Err(e) = $hook.initialize(typed_addr, $hook_fn).and_then(|_| $hook.enable()) {
+                        log_event(
+                            LogLevel::Warn,
+                            LogEvent::Error {
+                                source: "DynamicHook".to_string(),
+                                message: format!("Failed to hook {} in {}: {}", func_name_str, lib_name_str, e),
+                            },
+                        );
+                    }
+                } else {
+                     log_event(
+                        LogLevel::Debug,
                         LogEvent::Error {
-                            source: "Initialization".to_string(),
-                            message: msg.clone(),
+                            source: "DynamicHook".to_string(),
+                            message: format!("Function {} not found in {}", func_name_str, lib_name_str),
                         },
                     );
-                    msg
-                })?
+                }
+            }
+            // Silently ignore if the library is not loaded. This is common.
         };
     }
 
-    let ws2_32_name: Vec<u16> = "ws2_32.dll".encode_utf16().chain(std::iter::once(0)).collect();
-    let ws2_32 = GetModuleHandleW(ws2_32_name.as_ptr());
-    if ws2_32 != 0 {
-        if let Some(addr) = GetProcAddress(ws2_32, b"connect\0".as_ptr()) {
-            hook!(ConnectHook, std::mem::transmute(addr), hooked_connect);
-        }
-        if let Some(addr) = GetProcAddress(ws2_32, b"GetAddrInfoW\0".as_ptr()) {
-            hook!(
-                GetAddrInfoWHook,
-                std::mem::transmute(addr),
-                hooked_get_addr_info_w
-            );
-        }
+    dyn_hook!(ConnectHook, "ws2_32.dll", b"connect\0", hooked_connect);
+    dyn_hook!(GetAddrInfoWHook, "ws2_32.dll", b"GetAddrInfoW\0", hooked_get_addr_info_w);
+
+    dyn_hook!(NtTerminateProcessHook, "ntdll.dll", b"NtTerminateProcess\0", hooked_nt_terminate_process);
+    dyn_hook!(NtQueryInformationProcessHook, "ntdll.dll", b"NtQueryInformationProcess\0", |a, b, c, d, e| hooked_nt_query_information_process(a, b, c, d, e));
+
+    dyn_hook!(HttpSendRequestWHook, "wininet.dll", b"HttpSendRequestW\0", hooked_http_send_request_w);
+
+    dyn_hook!(FreeLibraryHook, "kernel32.dll", b"FreeLibrary\0", |a| hooked_free_library(a));
+
+    dyn_hook!(CryptEncryptHook, "advapi32.dll", b"CryptEncrypt\0", |a, b, c, d, e, f, g| hooked_crypt_encrypt(a, b, c, d, e, f, g));
+    dyn_hook!(CryptDecryptHook, "advapi32.dll", b"CryptDecrypt\0", |a, b, c, d, e, f| hooked_crypt_decrypt(a, b, c, d, e, f));
+
+    if CONFIG.features.get().map_or(false, |f| f.network_hooks_enabled) {
+        // C2 Detection Hooks
+        dyn_hook!(WSASendHook, "ws2_32.dll", b"WSASend\0", |a, b, c, d, e, f, g| hooked_wsasend(a, b, c, d, e, f, g));
+        dyn_hook!(SendHook, "ws2_32.dll", b"send\0", |a, b, c, d| hooked_send(a, b, c, d));
+        // Note: WSARecv and recv are more complex to hook safely due to buffer management. Skipping for now.
+
+        dyn_hook!(InternetOpenWHook, "wininet.dll", b"InternetOpenW\0", |a, b, c, d, e| hooked_internet_open_w(a, b, c, d, e));
+        dyn_hook!(InternetConnectWHook, "wininet.dll", b"InternetConnectW\0", |a, b, c, d, e, f, g, h| hooked_internet_connect_w(a, b, c, d, e, f, g, h));
+        dyn_hook!(HttpOpenRequestWHook, "wininet.dll", b"HttpOpenRequestW\0", |a, b, c, d, e, f, g, h| hooked_http_open_request_w(a, b, c, d, e, f, g, h));
+        dyn_hook!(InternetReadFileHook, "wininet.dll", b"InternetReadFile\0", |a, b, c, d| hooked_internet_read_file(a, b, c, d));
+
+        dyn_hook!(DnsQuery_WHook, "dnsapi.dll", b"DnsQuery_W\0", |a, b, c, d, e, f| hooked_dns_query_w(a, b, c, d, e, f));
+        dyn_hook!(DnsQuery_AHook, "dnsapi.dll", b"DnsQuery_A\0", |a, b, c, d, e, f| hooked_dns_query_a(a, b, c, d, e, f));
     }
 
-    let ntdll_name: Vec<u16> = "ntdll.dll".encode_utf16().chain(std::iter::once(0)).collect();
-    let ntdll = GetModuleHandleW(ntdll_name.as_ptr());
-    if ntdll != 0 {
-        if let Some(addr) = GetProcAddress(ntdll, b"NtTerminateProcess\0".as_ptr()) {
-            hook!(
-                NtTerminateProcessHook,
-                std::mem::transmute(addr),
-                hooked_nt_terminate_process
-            );
-        }
-        if let Some(addr) = GetProcAddress(ntdll, b"NtQueryInformationProcess\0".as_ptr()) {
-            hook!(
-                NtQueryInformationProcessHook,
-                std::mem::transmute(addr),
-                |a, b, c, d, e| hooked_nt_query_information_process(a, b, c, d, e)
-            );
-        }
+    if CONFIG.features.get().map_or(false, |f| f.crypto_hooks_enabled) {
+        dyn_hook!(CertVerifyCertificateChainPolicyHook, "crypt32.dll", b"CertVerifyCertificateChainPolicy\0", |a, b, c, d| hooked_cert_verify_certificate_chain_policy(a, b, c, d));
+        dyn_hook!(CryptHashDataHook, "advapi32.dll", b"CryptHashData\0", |a, b, c, d| hooked_crypt_hash_data(a, b, c, d));
     }
 
-    let wininet_name: Vec<u16> = "wininet.dll"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let wininet = GetModuleHandleW(wininet_name.as_ptr());
-    if wininet != 0 {
-        if let Some(addr) = GetProcAddress(wininet, b"HttpSendRequestW\0".as_ptr()) {
-            hook!(
-                HttpSendRequestWHook,
-                std::mem::transmute(addr),
-                hooked_http_send_request_w
-            );
-        }
-    }
+    dyn_hook!(NtCreateThreadExHook, "ntdll.dll", b"NtCreateThreadEx\0", |a, b, c, d, e, f, g, h, i, j, k| hooked_nt_create_thread_ex(a, b, c, d, e, f, g, h, i, j, k));
+    dyn_hook!(SystemHook, "msvcrt.dll", b"system\0", |a| hooked_system(a));
+    dyn_hook!(ShellExecuteExWHook, "shell32.dll", b"ShellExecuteExW\0", |a| hooked_shell_execute_ex_w(a));
+}
 
-    let kernel32_name: Vec<u16> = "kernel32.dll"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let kernel32 = GetModuleHandleW(kernel32_name.as_ptr());
-    if kernel32 != 0 {
-        if let Some(addr) = GetProcAddress(kernel32, b"FreeLibrary\0".as_ptr()) {
-            hook!(FreeLibraryHook, std::mem::transmute(addr), |a| {
-                hooked_free_library(a)
-            });
-        }
+pub unsafe fn hooked_shell_execute_ex_w(p_shellexecuteinfo: *mut c_void) -> BOOL {
+    // A more complex structure to parse here, for now we just log the call.
+    if let Some(_guard) = ReentrancyGuard::new() {
+        log_event(
+            LogLevel::Warn,
+            LogEvent::ApiHook {
+                function_name: "ShellExecuteExW".to_string(),
+                parameters: json!({ "note": "Extended shell execution attempt." }),
+                stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
+            },
+        );
     }
-
-    let advapi32_name: Vec<u16> = "advapi32.dll"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let advapi32 = GetModuleHandleW(advapi32_name.as_ptr());
-    if advapi32 != 0 {
-        if let Some(addr) = GetProcAddress(advapi32, b"CryptEncrypt\0".as_ptr()) {
-            hook!(
-                CryptEncryptHook,
-                std::mem::transmute(addr),
-                |a, b, c, d, e, f, g| hooked_crypt_encrypt(a, b, c, d, e, f, g)
-            );
-        }
-        if let Some(addr) = GetProcAddress(advapi32, b"CryptDecrypt\0".as_ptr()) {
-            hook!(
-                CryptDecryptHook,
-                std::mem::transmute(addr),
-                |a, b, c, d, e, f| hooked_crypt_decrypt(a, b, c, d, e, f)
-            );
-        }
-    }
-
-    Ok(())
+    ShellExecuteExWHook.call(p_shellexecuteinfo)
 }

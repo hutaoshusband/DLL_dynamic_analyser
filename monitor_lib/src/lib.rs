@@ -1,4 +1,4 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 #![cfg(windows)]
 
 mod code_monitor;
@@ -15,19 +15,19 @@ mod vmp_dumper;
 use crate::config::{LogLevel, MonitorConfig, CONFIG};
 use crate::hooks::{cpprest_hook, winapi_hooks};
 use crate::logging::{LogEntry, LogEvent};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use widestring::U16CString;
-use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HINSTANCE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
     PIPE_TYPE_MESSAGE, PIPE_WAIT,
@@ -39,6 +39,7 @@ use windows_sys::Win32::Security::{
     InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR,
 };
+
 
 // --- Globals ---
 pub static SUSPICION_SCORE: AtomicUsize = AtomicUsize::new(0);
@@ -68,8 +69,19 @@ pub fn log_event(level: LogLevel, event: LogEvent) {
     }
 }
 
+// A simple, panic-safe file logger for early-stage debugging.
+fn debug_log(message: &str) {
+    let pid = unsafe { GetCurrentProcessId() };
+    let log_path = std::env::temp_dir().join(format!("monitor_lib_debug_{}.log", pid));
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let _ = writeln!(file, "[{}] {}", timestamp, message);
+    }
+}
+
 /// The main initialization thread. Creates the pipe server, waits for config, and starts features.
 fn main_initialization_thread() {
+    debug_log("main_initialization_thread started.");
     let pipe_handle = unsafe {
         let pid = GetCurrentProcessId();
         let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
@@ -91,13 +103,19 @@ fn main_initialization_thread() {
         )
     };
 
-    if pipe_handle == INVALID_HANDLE_VALUE { return; }
+    if pipe_handle == INVALID_HANDLE_VALUE {
+        debug_log(&format!("Failed to create named pipe. Error: {}", unsafe { GetLastError() }));
+        return;
+    }
+    debug_log("Named pipe created successfully.");
 
     let connected = unsafe { ConnectNamedPipe(pipe_handle, std::ptr::null_mut()) != 0 };
     if !connected {
+        debug_log(&format!("Failed to connect named pipe. Error: {}", unsafe { GetLastError() }));
         unsafe { CloseHandle(pipe_handle); }
         return;
     }
+    debug_log("Pipe connected.");
 
     let mut buffer = [0u8; 1024];
     let mut bytes_read = 0;
@@ -107,20 +125,27 @@ fn main_initialization_thread() {
 
     if success && bytes_read > 0 {
         let config_str = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
+        debug_log(&format!("Received config string: {}", config_str));
         if let Ok(config) = serde_json::from_str::<MonitorConfig>(&config_str) {
+            debug_log("Config parsed successfully.");
             if CONFIG.features.set(config).is_ok() {
-                let (sender, receiver) = unbounded();
+                let (sender, receiver) = bounded(1024);
                 LOG_SENDER.set(sender).expect("Log sender already set");
                 let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
                 THREAD_HANDLES.lock().unwrap().push(log_thread);
+                debug_log("Starting feature initialization...");
                 initialize_features(config);
+                debug_log("Feature initialization returned.");
             }
         } else {
+            debug_log("Failed to parse config string.");
             unsafe { CloseHandle(pipe_handle); }
         }
     } else {
+        debug_log(&format!("Failed to read from pipe. Success: {}, BytesRead: {}, Error: {}", success, bytes_read, unsafe { GetLastError() }));
         unsafe { CloseHandle(pipe_handle); }
     }
+    debug_log("main_initialization_thread finished.");
 }
 
 fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {
@@ -174,9 +199,7 @@ fn initialize_features(config: MonitorConfig) {
 
     if config.api_hooks_enabled {
         unsafe {
-            if let Err(e) = winapi_hooks::initialize_all_hooks() {
-                log_event(LogLevel::Error, LogEvent::Error { source: "HookInit".into(), message: e });
-            }
+            winapi_hooks::initialize_all_hooks();
         }
         thread::spawn(cpprest_hook::initialize_and_enable_hook);
     }
@@ -213,17 +236,29 @@ fn initialize_features(config: MonitorConfig) {
     log_event(LogLevel::Info, LogEvent::Initialization { status: "Feature initialization complete.".to_string() });
 }
 
+
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserved: *mut c_void) -> BOOL {
-    if call_reason == DLL_PROCESS_ATTACH {
-        let init_thread = thread::spawn(main_initialization_thread);
-        THREAD_HANDLES.lock().unwrap().push(init_thread);
-    } else if call_reason == DLL_PROCESS_DETACH {
-        SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-        if let Some(sender) = LOG_SENDER.get() {
-            let _ = sender.send(None);
+    match call_reason {
+        DLL_PROCESS_ATTACH => {
+            debug_log("DllMain called with DLL_PROCESS_ATTACH.");
+            // Using a separate thread for initialization is crucial to avoid deadlocks
+            // inside DllMain, which is a highly restricted environment.
+            let init_thread = thread::spawn(main_initialization_thread);
+            THREAD_HANDLES.lock().unwrap().push(init_thread);
+            debug_log("Initialization thread spawned from DllMain.");
         }
+        DLL_PROCESS_DETACH => {
+            debug_log("DllMain called with DLL_PROCESS_DETACH.");
+            SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
+            // Signal the logging thread to shut down.
+            if let Some(sender) = LOG_SENDER.get() {
+                let _ = sender.send(None);
+            }
+            debug_log("Shutdown signal sent.");
+        }
+        _ => {}
     }
-    1
+    1 // Return TRUE to indicate success.
 }
