@@ -14,24 +14,21 @@ use std::io::Write;
 use std::mem;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use std::slice;
-use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+use iced_x86::{Decoder, DecoderOptions, NasmFormatter};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, MAX_PATH};
+use windows_sys::Win32::Foundation::{MAX_PATH};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     ReadProcessMemory, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
-    TH32CS_SNAPMODULE32,
 };
 use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 use windows_sys::Win32::System::Memory::{
     PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess};
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
 
 // Data structures for tracking memory and VMP targets
