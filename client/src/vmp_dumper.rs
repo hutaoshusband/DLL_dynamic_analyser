@@ -1,4 +1,5 @@
 // monitor_lib/src/vmp_dumper.rs
+#![allow(dead_code, unused_variables)]
 
 use crate::config::LogLevel;
 use crate::logging::LogEvent;
@@ -21,8 +22,6 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{MAX_PATH};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     ReadProcessMemory, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
-};
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 use windows_sys::Win32::System::Memory::{
@@ -135,7 +134,7 @@ pub fn track_memory_allocation(
 fn analyze_unpacked_code(code: &[u8], base_address: usize) {
     const BITNESS: u32 = 64;
     let mut decoder = Decoder::with_ip(BITNESS, code, base_address as u64, DecoderOptions::NONE);
-    let mut formatter = NasmFormatter::new();
+    let _formatter = NasmFormatter::new();
 
     for instr in decoder.iter().take(10) { // Analyze first 10 instructions
         // Check for popad (0x61), a common instruction at the end of an unpacker stub.
@@ -171,6 +170,9 @@ fn analyze_unpacked_code(code: &[u8], base_address: usize) {
     }
 }
 
+use crate::config::CONFIG;
+use crate::SHUTDOWN_SIGNAL;
+
 pub fn start_vmp_monitoring() {
     thread::spawn(|| {
         log_event(
@@ -181,10 +183,13 @@ pub fn start_vmp_monitoring() {
             },
         );
 
-        loop {
-            thread::sleep(Duration::from_secs(30));
-            scan_for_vmp_modules();
-            analyze_and_dump_if_ready();
+        while !SHUTDOWN_SIGNAL.load(Ordering::Relaxed) {
+            let is_enabled = CONFIG.features.read().unwrap().vmp_dump_enabled;
+            if is_enabled {
+                scan_for_vmp_modules();
+                analyze_and_dump_if_ready();
+            }
+            thread::sleep(Duration::from_secs(10));
         }
     });
 }

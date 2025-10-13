@@ -10,7 +10,7 @@ use eframe::egui;
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([300.0, 200.0]) // Compact initial window
+            .with_inner_size([800.0, 600.0]) // Larger initial window
             .with_resizable(true),
         ..Default::default()
     };

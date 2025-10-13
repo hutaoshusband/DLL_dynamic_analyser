@@ -30,6 +30,36 @@ impl eframe::App for App {
             state.handle_log(&log_json);
         }
 
+        // Render the main menu bar
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Exit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut state.windows.log_window_open, "Logs");
+                    ui.checkbox(
+                        &mut state.windows.memory_analysis_window_open,
+                        "Memory Analysis",
+                    );
+                    ui.checkbox(
+                        &mut state.windows.hooking_control_window_open,
+                        "Hooking Controls",
+                    );
+                    ui.checkbox(
+                        &mut state.windows.entropy_viewer_window_open,
+                        "Entropy Viewer",
+                    );
+                    ui.checkbox(
+                        &mut state.windows.network_activity_window_open,
+                        "Network Activity",
+                    );
+                });
+            });
+        });
+
         // Render the UI
         crate::gui::render(ctx, &mut state);
 

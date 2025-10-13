@@ -10,7 +10,7 @@ use std::{
 };
 use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
 
-use crate::app::state::MonitorConfig;
+use shared::MonitorConfig;
 
 use super::{communication, injection};
 

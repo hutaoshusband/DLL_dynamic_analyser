@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables)]
 use crate::config::{LogLevel, CONFIG};
 use crate::SUSPICION_SCORE;
 use chrono::{DateTime, Utc};
@@ -57,7 +58,7 @@ impl LogEntry {
             event_stack_trace
         } else {
             // Fallback to the original logic if no trace is provided in the event.
-            let should_capture_stack = if CONFIG.stack_trace_on_error_only {
+            let should_capture_stack = if CONFIG.stack_trace_on_error {
                 // For Fatal and Error, we always want a trace if possible.
                 level == LogLevel::Error || level == LogLevel::Fatal
             } else {
