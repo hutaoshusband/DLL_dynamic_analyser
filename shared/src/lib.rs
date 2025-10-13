@@ -6,6 +6,7 @@ pub enum Command {
     DumpSection { name: String },
     CalculateEntropy { name: String },
     UpdateConfig(MonitorConfig),
+    DumpModule { module_name: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]

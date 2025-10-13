@@ -41,6 +41,7 @@ use windows_sys::Win32::Security::{
     InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR,
 };
+use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
 
 
 // --- Globals ---
@@ -68,6 +69,61 @@ pub fn log_event(level: LogLevel, event: LogEvent) {
     if let Some(sender) = LOG_SENDER.get() {
         let entry = LogEntry::new(level, event);
         let _ = sender.try_send(Some(entry));
+    }
+}
+
+fn handle_dump_module(module_name: &str) {
+    debug_log(&format!("Handling DumpModule command for module: {}", module_name));
+    let wide_module_name = U16CString::from_str(module_name).unwrap();
+    let module_handle = unsafe { GetModuleHandleW(wide_module_name.as_ptr()) };
+
+    if module_handle == 0 {
+        log_event(
+            LogLevel::Error,
+            LogEvent::Error {
+                source: "handle_dump_module".to_string(),
+                message: format!("Failed to get handle for module: {}", module_name),
+            },
+        );
+        return;
+    }
+
+    unsafe {
+        let dos_header = &*(module_handle as *const pelite::image::IMAGE_DOS_HEADER);
+        if dos_header.e_magic != pelite::image::IMAGE_DOS_SIGNATURE {
+            log_event(
+                LogLevel::Error,
+                LogEvent::Error {
+                    source: "handle_dump_module".to_string(),
+                    message: format!("Invalid DOS signature for module: {}", module_name),
+                },
+            );
+            return;
+        }
+
+        let nt_headers = &*((module_handle as *const u8).add(dos_header.e_lfanew as usize)
+            as *const pelite::image::IMAGE_NT_HEADERS64);
+        if nt_headers.Signature != 0x00004550 { // "PE\0\0"
+            log_event(
+                LogLevel::Error,
+                LogEvent::Error {
+                    source: "handle_dump_module".to_string(),
+                    message: format!("Invalid NT signature for module: {}", module_name),
+                },
+            );
+            return;
+        }
+
+        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let image_slice = std::slice::from_raw_parts(module_handle as *const u8, image_size);
+
+        log_event(
+            LogLevel::Info,
+            LogEvent::ModuleDump {
+                module_name: module_name.to_string(),
+                data: image_slice.to_vec(),
+            },
+        );
     }
 }
 
@@ -193,6 +249,9 @@ fn command_listener_thread(pipe_handle: isize) {
                         // Potentially re-initialize features or hooks based on the new config
                         // For now, we assume hooks check the config dynamically.
                     }
+                    Ok(Command::DumpModule { module_name }) => {
+                        handle_dump_module(&module_name);
+                    }
                     Err(e) => debug_log(&format!("Failed to parse command: '{}', error: {}", part, e)),
                 }
             }
@@ -206,6 +265,12 @@ fn command_listener_thread(pipe_handle: isize) {
         }
     }
     debug_log("Command listener thread finished.");
+    if pipe_handle != INVALID_HANDLE_VALUE {
+        unsafe {
+            DisconnectNamedPipe(pipe_handle);
+            CloseHandle(pipe_handle);
+        }
+    }
 }
 
 fn shannon_entropy(data: &[u8]) -> f32 {
@@ -332,20 +397,49 @@ fn handle_list_sections() {
     }
 }
 
-fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {
-    let mut log_file = {
-        let _guard = ReentrancyGuard::new();
-        let mut file: Option<File> = None;
-        if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
-            let mut log_dir = PathBuf::from(appdata);
-            log_dir.push("cs2_creator");
-            log_dir.push("logs");
-            if fs::create_dir_all(&log_dir).is_ok() {
-                let log_path = log_dir.join(format!("log_{}.txt", unsafe { GetCurrentProcessId() }));
-                file = OpenOptions::new().create(true).append(true).open(log_path).ok();
-            }
+fn get_log_file_path() -> Option<PathBuf> {
+    const MAX_PATH: usize = 260;
+    let mut path_buf = [0u16; MAX_PATH];
+    let result = unsafe {
+        SHGetFolderPathW(
+            0,
+            CSIDL_LOCAL_APPDATA as i32,
+            0,
+            0,
+            path_buf.as_mut_ptr(),
+        )
+    };
+
+    if result == 0 { // S_OK
+        let path_len = path_buf.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
+        let log_dir = PathBuf::from(String::from_utf16_lossy(&path_buf[..path_len]));
+
+        let mut dir = log_dir.join("cs2_creator");
+        dir.push("logs");
+        if fs::create_dir_all(&dir).is_err() {
+            return None;
         }
-        file
+
+        let pid = unsafe { GetCurrentProcessId() };
+        Some(dir.join(format!("log_{}.txt", pid)))
+    } else {
+        None
+    }
+}
+
+
+fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {
+    let mut log_file: Option<File> = {
+        let _guard = ReentrancyGuard::new();
+        if let Some(log_path) = get_log_file_path() {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+                .ok()
+        } else {
+            None
+        }
     };
 
     while let Ok(Some(log_entry)) = receiver.recv() {
@@ -367,12 +461,6 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
         }
     }
 
-    if pipe_handle != INVALID_HANDLE_VALUE {
-        unsafe {
-            DisconnectNamedPipe(pipe_handle);
-            CloseHandle(pipe_handle);
-        }
-    }
 }
 
 fn initialize_features() {
