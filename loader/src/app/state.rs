@@ -38,6 +38,7 @@ pub struct SectionInfo {
 #[derive(serde::Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "event_type", content = "details")]
 pub enum LogEvent {
+    Message(String),
     Initialization {
         status: String,
     },
@@ -114,6 +115,22 @@ pub struct LogEntry {
 impl PartialEq for LogEntry {
     fn eq(&self, other: &Self) -> bool {
         self.level == other.level && self.event == other.event
+    }
+}
+
+impl LogEntry {
+    pub fn new(level: LogLevel, event: LogEvent) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            level,
+            // These are placeholders, as the loader doesn't have this info directly.
+            // The real values come from the client.
+            process_id: 0,
+            thread_id: 0,
+            suspicion_score: 0,
+            event,
+            stack_trace: None,
+        }
     }
 }
 
@@ -196,36 +213,59 @@ impl AppState {
     }
 
     pub fn handle_log(&mut self, log_json: &str) {
-        if let Ok(new_log) = serde_json::from_str::<LogEntry>(log_json) {
-            match &new_log.event {
-                LogEvent::SectionList { sections } => {
-                    *self.sections.lock().unwrap() = sections.clone();
-                }
-                LogEvent::SectionDump { name, data } => {
-                    if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
-                        if let Err(_e) = std::fs::write(&path, data) {
-                            // Log error to GUI
+        match serde_json::from_str::<LogEntry>(log_json) {
+            Ok(new_log) => {
+                match &new_log.event {
+                    LogEvent::SectionList { sections } => {
+                        *self.sections.lock().unwrap() = sections.clone();
+                    }
+                    LogEvent::SectionDump { name, data } => {
+                        if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
+                            if let Err(e) = std::fs::write(&path, data) {
+                                self.add_log_entry(LogEntry::new(
+                                    LogLevel::Error,
+                                    LogEvent::Error {
+                                        source: "GUI".to_string(),
+                                        message: format!("Failed to save dump: {}", e),
+                                    },
+                                ));
+                            }
                         }
                     }
+                    LogEvent::EntropyResult { name, entropy } => {
+                        self.entropy_results
+                            .lock()
+                            .unwrap()
+                            .insert(name.clone(), entropy.clone());
+                    }
+                    _ => {}
                 }
-                LogEvent::EntropyResult { name, entropy } => {
-                    self.entropy_results
-                        .lock()
-                        .unwrap()
-                        .insert(name.clone(), entropy.clone());
-                }
-                _ => {}
-            }
 
-            if let Some((last_log, count)) = self.logs.last_mut() {
-                if *last_log == new_log {
-                    *count += 1;
-                } else {
-                    self.logs.push((new_log, 1));
-                }
+                self.add_log_entry(new_log);
+            }
+            Err(e) => {
+                let error_log = LogEntry::new(
+                    LogLevel::Error,
+                    LogEvent::Error {
+                        source: "Log Deserialization".to_string(),
+                        message: format!("Failed to parse log: {}. Original: '{}'", e, log_json),
+                    },
+                );
+                self.add_log_entry(error_log);
+            }
+        }
+    }
+
+    // Helper function to add a log entry and handle deduplication
+    fn add_log_entry(&mut self, new_log: LogEntry) {
+        if let Some((last_log, count)) = self.logs.last_mut() {
+            if *last_log == new_log {
+                *count += 1;
             } else {
                 self.logs.push((new_log, 1));
             }
+        } else {
+            self.logs.push((new_log, 1));
         }
     }
 }

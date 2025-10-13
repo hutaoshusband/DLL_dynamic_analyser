@@ -37,6 +37,7 @@ pub fn render_log_window(ctx: &egui::Context, state: &mut AppState) {
 
 fn format_log_event(event: &crate::app::state::LogEvent) -> String {
     match event {
+        crate::app::state::LogEvent::Message(msg) => msg.clone(),
         crate::app::state::LogEvent::Initialization { status } => status.clone(),
         crate::app::state::LogEvent::Shutdown { status } => status.clone(),
         crate::app::state::LogEvent::ApiHook {
