@@ -12,11 +12,11 @@ mod scanner;
 mod string_dumper;
 mod vmp_dumper;
 use crate::config::{LogLevel, CONFIG};
-use shared::MonitorConfig;
 use crate::hooks::{cpprest_hook, winapi_hooks};
-use crate::logging::{Command, LogEntry, LogEvent, SectionInfo};
+use crate::logging::{LogEntry, LogEvent, SectionInfo};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
+use shared::{Command, MonitorConfig};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -27,8 +27,9 @@ use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use widestring::U16CString;
-use windows_sys::Win32::Foundation::{CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE};
-use goblin::pe::PE;
+use windows_sys::Win32::Foundation::{
+    CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
     PIPE_TYPE_MESSAGE, PIPE_WAIT,
@@ -129,22 +130,22 @@ fn main_initialization_thread() {
         debug_log(&format!("Received config string: {}", config_str));
         if let Ok(config) = serde_json::from_str::<MonitorConfig>(&config_str) {
             debug_log("Config parsed successfully.");
-            if CONFIG.features.set(config).is_ok() {
-                let (sender, receiver) = bounded(1024);
-                let log_sender_clone = sender.clone();
-                LOG_SENDER.set(sender).expect("Log sender already set");
+            // Store the initial config
+            *CONFIG.features.write().unwrap() = config;
 
-                let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
-                let command_thread = thread::spawn(move || command_listener_thread(pipe_handle));
+            let (sender, receiver) = bounded(1024);
+            LOG_SENDER.set(sender).expect("Log sender already set");
 
-                let mut handles = THREAD_HANDLES.lock().unwrap();
-                handles.push(log_thread);
-                handles.push(command_thread);
+            let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
+            let command_thread = thread::spawn(move || command_listener_thread(pipe_handle));
 
-                debug_log("Starting feature initialization...");
-                initialize_features(config);
-                debug_log("Feature initialization returned.");
-            }
+            let mut handles = THREAD_HANDLES.lock().unwrap();
+            handles.push(log_thread);
+            handles.push(command_thread);
+
+            debug_log("Starting feature initialization...");
+            initialize_features();
+            debug_log("Feature initialization returned.");
         } else {
             debug_log("Failed to parse config string.");
             unsafe { CloseHandle(pipe_handle); }
@@ -160,6 +161,10 @@ fn command_listener_thread(pipe_handle: isize) {
     debug_log("Command listener thread started.");
     let mut buffer = [0u8; 4096];
     loop {
+        if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
+            break;
+        }
+
         let mut bytes_read = 0;
         let success = unsafe {
             ReadFile(
@@ -174,15 +179,29 @@ fn command_listener_thread(pipe_handle: isize) {
         if success && bytes_read > 0 {
             let command_str = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
             debug_log(&format!("Received command string: {}", command_str));
-            match serde_json::from_str::<Command>(&command_str) {
-                Ok(Command::ListSections) => handle_list_sections(),
-                Ok(Command::DumpSection { name }) => handle_dump_section(&name),
-                Ok(Command::CalculateEntropy { name }) => handle_calculate_entropy(&name),
-                Err(e) => debug_log(&format!("Failed to parse command: {}", e)),
+
+            // Handle multiple commands in a single read
+            for part in command_str.split('\n').filter(|s| !s.is_empty()) {
+                match serde_json::from_str::<Command>(part) {
+                    Ok(Command::ListSections) => handle_list_sections(),
+                    Ok(Command::DumpSection { name }) => handle_dump_section(&name),
+                    Ok(Command::CalculateEntropy { name }) => handle_calculate_entropy(&name),
+                    Ok(Command::UpdateConfig(new_config)) => {
+                        debug_log(&format!("Updating config: {:?}", new_config));
+                        let mut config_guard = CONFIG.features.write().unwrap();
+                        *config_guard = new_config;
+                        // Potentially re-initialize features or hooks based on the new config
+                        // For now, we assume hooks check the config dynamically.
+                    }
+                    Err(e) => debug_log(&format!("Failed to parse command: '{}', error: {}", part, e)),
+                }
             }
         } else {
             let error = unsafe { GetLastError() };
-            debug_log(&format!("ReadFile failed in command listener with error: {}. Shutting down.", error));
+            // ERROR_BROKEN_PIPE is expected when the loader disconnects
+            if error != windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
+                debug_log(&format!("ReadFile failed in command listener with error: {}. Shutting down.", error));
+            }
             break;
         }
     }
@@ -206,11 +225,13 @@ fn shannon_entropy(data: &[u8]) -> f32 {
     }).sum()
 }
 
+use pelite::pe64::{Pe, PeFile};
+
 fn handle_calculate_entropy(section_name: &str) {
     debug_log(&format!("Handling CalculateEntropy command for section: {}", section_name));
     unsafe {
-        let base_address = GetModuleHandleW(std::ptr::null_mut()) as usize;
-        if base_address == 0 {
+        let base = GetModuleHandleW(std::ptr::null());
+        if base == 0 {
             log_event(LogLevel::Error, LogEvent::Error {
                 source: "handle_calculate_entropy".to_string(),
                 message: "Failed to get main module handle.".to_string(),
@@ -218,15 +239,16 @@ fn handle_calculate_entropy(section_name: &str) {
             return;
         }
 
-        let dos_header = &*(base_address as *const goblin::pe::header::DosHeader);
-        let nt_headers = &*((base_address as *const u8).add(dos_header.pe_pointer as usize) as *const goblin::pe::header::Header);
-        let image_size = (*nt_headers).optional_header.as_ref().unwrap().windows_fields.size_of_image as usize;
-        let image_slice = std::slice::from_raw_parts(base_address as *const u8, image_size);
-        if let Ok(pe) = PE::parse(image_slice) {
-            for section in &pe.sections {
+        let dos_header = &*(base as *const pelite::image::IMAGE_DOS_HEADER);
+        let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
+        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let image_slice = std::slice::from_raw_parts(base as *const u8, image_size);
+
+        if let Ok(file) = PeFile::from_bytes(image_slice) {
+            for section in file.section_headers() {
                 if let Ok(name) = section.name() {
                     if name == section_name {
-                        let data = &image_slice[section.pointer_to_raw_data as usize..][..section.size_of_raw_data as usize];
+                        let data = file.get_section_bytes(section).unwrap_or(&[]);
                         const CHUNK_SIZE: usize = 256;
                         let entropy = data.chunks(CHUNK_SIZE)
                             .map(|chunk| shannon_entropy(chunk))
@@ -246,8 +268,8 @@ fn handle_calculate_entropy(section_name: &str) {
 fn handle_dump_section(section_name: &str) {
     debug_log(&format!("Handling DumpSection command for section: {}", section_name));
     unsafe {
-        let base_address = GetModuleHandleW(std::ptr::null()) as *const u8;
-        if base_address.is_null() {
+        let base = GetModuleHandleW(std::ptr::null());
+        if base == 0 {
             log_event(LogLevel::Error, LogEvent::Error {
                 source: "handle_dump_section".to_string(),
                 message: "Failed to get main module handle.".to_string(),
@@ -255,24 +277,16 @@ fn handle_dump_section(section_name: &str) {
             return;
         }
 
-        let base_address = GetModuleHandleW(std::ptr::null_mut()) as usize;
-        if base_address == 0 {
-            log_event(LogLevel::Error, LogEvent::Error {
-                source: "handle_dump_section".to_string(),
-                message: "Failed to get main module handle.".to_string(),
-            });
-            return;
-        }
+        let dos_header = &*(base as *const pelite::image::IMAGE_DOS_HEADER);
+        let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
+        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let image_slice = std::slice::from_raw_parts(base as *const u8, image_size);
 
-        let dos_header = &*(base_address as *const goblin::pe::header::DosHeader);
-        let nt_headers = &*((base_address as *const u8).add(dos_header.pe_pointer as usize) as *const goblin::pe::header::Header);
-        let image_size = (*nt_headers).optional_header.as_ref().unwrap().windows_fields.size_of_image as usize;
-        let image_slice = std::slice::from_raw_parts(base_address as *const u8, image_size);
-        if let Ok(pe) = PE::parse(image_slice) {
-            for section in &pe.sections {
+        if let Ok(file) = PeFile::from_bytes(image_slice) {
+            for section in file.section_headers() {
                 if let Ok(name) = section.name() {
                     if name == section_name {
-                        let data = &image_slice[section.pointer_to_raw_data as usize..][..section.size_of_raw_data as usize];
+                        let data = file.get_section_bytes(section).unwrap_or(&[]);
                         log_event(LogLevel::Info, LogEvent::SectionDump {
                             name: section_name.to_string(),
                             data: data.to_vec(),
@@ -290,8 +304,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 fn handle_list_sections() {
     debug_log("Handling ListSections command.");
     unsafe {
-        let base_address = GetModuleHandleW(std::ptr::null()) as *const u8;
-        if base_address.is_null() {
+        let base = GetModuleHandleW(std::ptr::null());
+        if base == 0 {
             log_event(LogLevel::Error, LogEvent::Error {
                 source: "handle_list_sections".to_string(),
                 message: "Failed to get main module handle.".to_string(),
@@ -299,26 +313,18 @@ fn handle_list_sections() {
             return;
         }
 
-        let base_address = GetModuleHandleW(std::ptr::null_mut()) as usize;
-        if base_address == 0 {
-            log_event(LogLevel::Error, LogEvent::Error {
-                source: "handle_calculate_entropy".to_string(),
-                message: "Failed to get main module handle.".to_string(),
-            });
-            return;
-        }
+        let dos_header = &*(base as *const pelite::image::IMAGE_DOS_HEADER);
+        let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
+        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
+        let image_slice = std::slice::from_raw_parts(base as *const u8, image_size);
 
-        let dos_header = &*(base_address as *const goblin::pe::header::DosHeader);
-        let nt_headers = &*((base_address as *const u8).add(dos_header.pe_pointer as usize) as *const goblin::pe::header::Header);
-        let image_size = (*nt_headers).optional_header.as_ref().unwrap().windows_fields.size_of_image as usize;
-        let image_slice = std::slice::from_raw_parts(base_address as *const u8, image_size);
-        if let Ok(pe) = PE::parse(image_slice) {
-            let sections = pe.sections.iter().map(|s| {
+        if let Ok(file) = PeFile::from_bytes(image_slice) {
+            let sections = file.section_headers().iter().map(|s| {
                 SectionInfo {
                     name: s.name().unwrap_or("").to_string(),
-                    virtual_address: s.virtual_address as usize,
-                    virtual_size: s.virtual_size as usize,
-                    characteristics: s.characteristics,
+                    virtual_address: s.VirtualAddress as usize,
+                    virtual_size: s.VirtualSize as usize,
+                    characteristics: s.Characteristics,
                 }
             }).collect();
             log_event(LogLevel::Info, LogEvent::SectionList { sections });
@@ -369,8 +375,9 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
     }
 }
 
-fn initialize_features(config: MonitorConfig) {
-    log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", config) });
+fn initialize_features() {
+    let config = CONFIG.features.read().unwrap();
+    log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", *config) });
 
     let addr = &CONFIG.termination_allowed as *const _ as usize;
     log_event(LogLevel::Debug, LogEvent::Initialization { status: format!("TERMINATION_FLAG_ADDR:{}", addr) });
@@ -394,6 +401,7 @@ fn initialize_features(config: MonitorConfig) {
         let manual_map = config.manual_map_scan_enabled;
         let scanner_handle = thread::spawn(move || {
             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
+                let current_config = CONFIG.features.read().unwrap();
                 unsafe {
                     if iat { iat_monitor::scan_iat_modifications(); }
                     if manual_map {
@@ -402,6 +410,7 @@ fn initialize_features(config: MonitorConfig) {
                         hardware_bp::check_debug_registers();
                     }
                 }
+                drop(current_config); // Release the lock
                 thread::sleep(Duration::from_secs(5));
             }
         });

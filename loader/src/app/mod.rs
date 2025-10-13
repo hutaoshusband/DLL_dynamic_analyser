@@ -40,8 +40,22 @@ impl eframe::App for App {
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut state.windows.log_window_open, "Logs");
-                    ui.checkbox(&mut state.windows.memory_analysis_window_open, "Memory Analysis");
-                    ui.checkbox(&mut state.windows.hooking_control_window_open, "Hooking Controls");
+                    ui.checkbox(
+                        &mut state.windows.memory_analysis_window_open,
+                        "Memory Analysis",
+                    );
+                    ui.checkbox(
+                        &mut state.windows.hooking_control_window_open,
+                        "Hooking Controls",
+                    );
+                    ui.checkbox(
+                        &mut state.windows.entropy_viewer_window_open,
+                        "Entropy Viewer",
+                    );
+                    ui.checkbox(
+                        &mut state.windows.network_activity_window_open,
+                        "Network Activity",
+                    );
                 });
             });
         });

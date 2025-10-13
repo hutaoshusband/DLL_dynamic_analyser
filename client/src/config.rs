@@ -1,69 +1,58 @@
-use once_cell::sync::{Lazy, OnceCell};
-use serde::{Deserialize, Serialize};
-use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
+#![allow(dead_code)]
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+use once_cell::sync::Lazy;
+use shared::MonitorConfig;
+use std::sync::{atomic::{AtomicBool, Ordering}, RwLock};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum LogLevel {
     Fatal = 0,
     Error = 1,
-    Warn = 2,
-    Info = 3,
-    Success = 4,
+    Success = 2,
+    Warn = 3,
+    Info = 4,
     Debug = 5,
     Trace = 6,
 }
 
-impl FromStr for LogLevel {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "fatal" => Ok(LogLevel::Fatal),
-            "error" => Ok(LogLevel::Error),
-            "warn" => Ok(LogLevel::Warn),
-            "info" => Ok(LogLevel::Info),
-            "success" => Ok(LogLevel::Success),
-            "debug" => Ok(LogLevel::Debug),
-            "trace" => Ok(LogLevel::Trace),
-            _ => Ok(LogLevel::Info),
+impl LogLevel {
+    pub fn from_env() -> Self {
+        match std::env::var("MONITOR_LOG_LEVEL").as_deref() {
+            Ok("FATAL") => LogLevel::Fatal,
+            Ok("ERROR") => LogLevel::Error,
+            Ok("SUCCESS") => LogLevel::Success,
+            Ok("WARN") => LogLevel::Warn,
+            Ok("INFO") => LogLevel::Info,
+            Ok("DEBUG") => LogLevel::Debug,
+            Ok("TRACE") => LogLevel::Trace,
+            _ => LogLevel::Info, // Default
         }
     }
 }
 
-use shared::MonitorConfig;
-
-#[derive(Debug)]
-pub struct Config {
-    pub log_level: LogLevel,
-    pub stack_trace_on_error_only: bool,
-    pub stack_trace_frame_limit: usize,
+pub struct Features {
+    pub features: RwLock<MonitorConfig>,
     pub termination_allowed: AtomicBool,
-    pub features: OnceCell<MonitorConfig>,
+    pub log_level: LogLevel,
+    pub stack_trace_on_error: bool,
+    pub stack_trace_frame_limit: usize,
 }
 
-impl Config {
-    fn from_env() -> Self {
-        let log_level = std::env::var("MONITOR_LOG_LEVEL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(LogLevel::Info);
-        let stack_trace_on_error_only = std::env::var("MONITOR_STACK_TRACE_ON_ERROR")
-            .ok()
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(true);
-        let stack_trace_frame_limit = std::env::var("MONITOR_STACK_TRACE_FRAME_LIMIT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(16);
-
-        Self {
-            log_level,
-            stack_trace_on_error_only,
-            stack_trace_frame_limit,
-            termination_allowed: AtomicBool::new(false),
-            features: OnceCell::new(),
-        }
+impl Features {
+    pub fn is_termination_allowed(&self) -> bool {
+        self.termination_allowed.load(Ordering::SeqCst)
     }
 }
 
-pub static CONFIG: Lazy<Config> = Lazy::new(Config::from_env);
+pub static CONFIG: Lazy<Features> = Lazy::new(|| Features {
+    features: RwLock::new(MonitorConfig::default()),
+    termination_allowed: AtomicBool::new(false),
+    log_level: LogLevel::from_env(),
+    stack_trace_on_error: std::env::var("MONITOR_STACK_TRACE_ON_ERROR")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(true),
+    stack_trace_frame_limit: std::env::var("MONITOR_STACK_TRACE_FRAME_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16),
+});

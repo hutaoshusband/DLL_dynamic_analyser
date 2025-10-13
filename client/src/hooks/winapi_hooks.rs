@@ -1147,7 +1147,7 @@ pub unsafe fn hooked_wsasend(
             for buffer in buffers {
                 total_len += buffer.len;
             }
-            if CONFIG.features.get().map_or(false, |f| f.log_network_data) {
+            if CONFIG.features.read().unwrap().log_network_data {
                 data_preview.clear();
                 for buffer in buffers {
                     if data_preview.len() < 256 { // Limit preview size
@@ -1176,7 +1176,7 @@ pub unsafe fn hooked_wsasend(
 
 pub unsafe fn hooked_send(s: SOCKET, buf: *const u8, len: i32, flags: i32) -> i32 {
     if let Some(_guard) = ReentrancyGuard::new() {
-        let data_preview = if CONFIG.features.get().map_or(false, |f| f.log_network_data) {
+        let data_preview = if CONFIG.features.read().unwrap().log_network_data {
             format_buffer_preview(buf, len as u32)
         } else {
             "<disabled>".to_string()
@@ -1930,7 +1930,7 @@ macro_rules! hook {
 }
 
 pub unsafe fn initialize_all_hooks() {
-    let config = CONFIG.features.get().unwrap();
+    let config = CONFIG.features.read().unwrap();
 
     // Hook critical process termination functions.
     if config.hook_exit_process {
@@ -2148,7 +2148,7 @@ pub unsafe fn initialize_all_hooks() {
 }
 
 unsafe fn initialize_dynamic_hooks() {
-    let config = CONFIG.features.get().unwrap();
+    let config = CONFIG.features.read().unwrap();
 
     macro_rules! dyn_hook {
         ($hook:ident, $lib:expr, $func:expr, $hook_fn:expr) => {

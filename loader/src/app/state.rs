@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -97,15 +97,6 @@ impl PartialEq for LogEvent {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "command", content = "payload")]
-pub enum Command {
-    ListSections,
-    DumpSection { name: String },
-    CalculateEntropy { name: String },
-    GetPeDetails,
-}
-
 #[derive(serde::Serialize, Deserialize, Debug)]
 pub struct LogEntry {
     #[serde(with = "chrono::serde::ts_seconds")]
@@ -153,8 +144,6 @@ pub struct AppState {
     pub windows: AppWindows,
 }
 
-#[derive(Default)]
-#[allow(dead_code)]
 pub struct AppWindows {
     pub log_window_open: bool,
     pub memory_analysis_window_open: bool,
@@ -162,6 +151,19 @@ pub struct AppWindows {
     pub hooking_control_window_open: bool,
     pub network_activity_window_open: bool,
     pub launcher_window_open: bool,
+}
+
+impl Default for AppWindows {
+    fn default() -> Self {
+        Self {
+            log_window_open: true,
+            memory_analysis_window_open: true,
+            entropy_viewer_window_open: false,
+            hooking_control_window_open: true,
+            network_activity_window_open: false,
+            launcher_window_open: true,
+        }
+    }
 }
 
 impl AppState {

@@ -1,7 +1,8 @@
 use eframe::egui;
 
-use crate::app::state::{AppState, Command};
+use crate::app::state::AppState;
 use crate::core::injection;
+use shared::Command;
 
 pub fn render_memory_analysis_window(ctx: &egui::Context, state: &mut AppState) {
     if !state.windows.memory_analysis_window_open {

@@ -184,7 +184,7 @@ pub fn start_vmp_monitoring() {
         );
 
         while !SHUTDOWN_SIGNAL.load(Ordering::Relaxed) {
-            let is_enabled = CONFIG.features.get().unwrap().vmp_dump_enabled;
+            let is_enabled = CONFIG.features.read().unwrap().vmp_dump_enabled;
             if is_enabled {
                 scan_for_vmp_modules();
                 analyze_and_dump_if_ready();

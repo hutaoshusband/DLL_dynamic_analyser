@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum Command {
+    ListSections,
+    DumpSection { name: String },
+    CalculateEntropy { name: String },
+    UpdateConfig(MonitorConfig),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct MonitorConfig {
     pub api_hooks_enabled: bool,
