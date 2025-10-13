@@ -104,6 +104,7 @@ pub struct LogEntry {
     pub level: LogLevel,
     pub process_id: u32,
     pub thread_id: u32,
+    pub suspicion_score: usize,
     #[serde(flatten)]
     pub event: LogEvent,
     #[serde(skip_serializing_if = "Option::is_none")]
