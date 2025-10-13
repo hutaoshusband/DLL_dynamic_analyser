@@ -1,8 +1,7 @@
 // monitor_lib/src/vmp_dumper.rs
 #![allow(dead_code, unused_variables)]
 
-use crate::config::LogLevel;
-use crate::logging::LogEvent;
+use shared::logging::{LogLevel, LogEvent};
 use crate::{log_event, SUSPICION_SCORE};
 use chrono::{DateTime, Utc};
 use std::sync::atomic::Ordering;

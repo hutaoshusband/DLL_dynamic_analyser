@@ -1,3 +1,4 @@
+use crate::app::state::AppState;
 use std::{
     path::Path,
     sync::{
@@ -13,6 +14,43 @@ use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObjec
 use shared::MonitorConfig;
 
 use super::{communication, injection};
+
+pub fn start_auto_inject_thread(state: &mut AppState) {
+    let auto_inject_enabled = state.auto_inject_enabled.clone();
+    let is_process_running = state.is_process_running.clone();
+    let target_process_name = state.target_process_name.clone();
+    let dll_path = state.dll_path.clone();
+    let log_sender = state.log_sender.clone();
+    let monitor_config = state.monitor_config;
+    let process_id = state.process_id.clone();
+    let process_handle = state.process_handle.clone();
+    let pipe_handle = state.pipe_handle.clone();
+    let injection_status = state.injection_status.clone();
+
+    let handle = thread::spawn(move || {
+        while auto_inject_enabled.load(Ordering::SeqCst) {
+            if !is_process_running.load(Ordering::SeqCst) {
+                if let Some(dll_path) = dll_path.clone() {
+                    run_analysis(
+                        log_sender.clone(),
+                        Some(target_process_name.as_str()),
+                        None,
+                        &dll_path,
+                        monitor_config,
+                        process_id.clone(),
+                        process_handle.clone(),
+                        pipe_handle.clone(),
+                        is_process_running.clone(),
+                        injection_status.clone(),
+                    );
+                }
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    *state.auto_inject_thread.lock().unwrap() = Some(handle);
+}
 
 pub fn start_analysis_thread(
     logger: Sender<String>,

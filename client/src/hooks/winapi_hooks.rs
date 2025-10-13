@@ -1,5 +1,6 @@
-use crate::config::{LogLevel, CONFIG};
-use crate::logging::{capture_stack_trace, LogEvent};
+use shared::logging::{LogLevel, LogEvent};
+use crate::config::CONFIG;
+use crate::logging::capture_stack_trace;
 use crate::{log_event, SUSPICION_SCORE};
 use crate::ReentrancyGuard;
 use once_cell::sync::Lazy;

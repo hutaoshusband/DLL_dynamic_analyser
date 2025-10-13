@@ -1,6 +1,5 @@
 #![allow(dead_code, unused_variables)]
-use crate::config::LogLevel;
-use crate::logging::LogEvent;
+use shared::logging::{LogLevel, LogEvent};
 use crate::{log_event, ReentrancyGuard};
 use patternscan::scan;
 use std::ffi::OsString;
