@@ -6,7 +6,7 @@ use std::{
 };
 use shared::{
     logging::{LogEntry, LogEvent, LogLevel, SectionInfo},
-    MonitorConfig,
+    MonitorConfig, Preset,
 };
 pub const DLL_NAME: &str = "client.dll";
 
@@ -34,6 +34,7 @@ pub struct AppState {
     pub sections: Arc<Mutex<Vec<SectionInfo>>>,
     pub selected_section_name: Option<String>,
     pub entropy_results: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    pub selected_preset: Preset,
     pub monitor_config: MonitorConfig,
     pub windows: AppWindows,
     pub auto_inject_enabled: Arc<AtomicBool>,
@@ -69,6 +70,8 @@ impl AppState {
             .and_then(|p| p.parent().map(|p| p.join(DLL_NAME)))
             .filter(|p| p.exists());
 
+        let default_preset = Preset::default();
+
         Self {
             target_process_name: "cs2.exe".to_owned(),
             manual_injection_pid: String::new(),
@@ -85,7 +88,8 @@ impl AppState {
             sections: Arc::new(Mutex::new(Vec::new())),
             selected_section_name: None,
             entropy_results: Arc::new(Mutex::new(HashMap::new())),
-            monitor_config: MonitorConfig::default(),
+            selected_preset: default_preset,
+            monitor_config: MonitorConfig::from_preset(default_preset),
             windows: AppWindows::default(),
             auto_inject_enabled: Arc::new(AtomicBool::new(false)),
             auto_inject_thread: Arc::new(Mutex::new(None)),
