@@ -338,7 +338,7 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
         let mut file: Option<File> = None;
         if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
             let mut log_dir = PathBuf::from(appdata);
-            log_dir.push("cs2_monitor");
+            log_dir.push("cs2_creator");
             log_dir.push("logs");
             if fs::create_dir_all(&log_dir).is_ok() {
                 let log_path = log_dir.join(format!("log_{}.txt", unsafe { GetCurrentProcessId() }));
