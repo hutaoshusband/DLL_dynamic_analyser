@@ -8,6 +8,7 @@ crate-type = ["cdylib"]
 test = false
 
 [dependencies]
+shared = { path = "../shared", version = "0.1.0" }
 log = { workspace = true }
 simple_logger = { workspace = true }
 widestring = { workspace = true }

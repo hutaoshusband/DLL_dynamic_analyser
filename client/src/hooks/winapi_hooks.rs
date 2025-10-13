@@ -186,8 +186,8 @@ static_detour! {
     ) -> BOOL;
 
     // C2 Detection Hooks
-    pub static WSASendHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, u32, *mut OVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE) -> i32;
-    pub static WSARecvHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, *mut u32, *mut OVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE) -> i32;
+    pub static WSASendHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, u32, *mut OVERLAPPED, LpwsaOverlappedCompletionRoutine) -> i32;
+    pub static WSARecvHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, *mut u32, *mut OVERLAPPED, LpwsaOverlappedCompletionRoutine) -> i32;
     pub static SendHook: unsafe extern "system" fn(SOCKET, *const u8, i32, i32) -> i32;
     pub static RecvHook: unsafe extern "system" fn(SOCKET, *mut u8, i32, i32) -> i32;
     pub static InternetOpenWHook: unsafe extern "system" fn(*const u16, u32, *const u16, *const u16, u32) -> HINTERNET;
@@ -217,7 +217,7 @@ static_detour! {
 }
 
 // Type definitions for function pointers and structs that might be missing or complex.
-type LPWSAOVERLAPPED_COMPLETION_ROUTINE = Option<unsafe extern "system" fn(u32, u32, *mut OVERLAPPED, u32)>;
+type LpwsaOverlappedCompletionRoutine = Option<unsafe extern "system" fn(u32, u32, *mut OVERLAPPED, u32)>;
 
 pub fn hooked_is_debugger_present() -> BOOL {
     let should_log = {
@@ -1137,7 +1137,7 @@ pub unsafe fn hooked_wsasend(
     lp_number_of_bytes_sent: *mut u32,
     dw_flags: u32,
     lp_overlapped: *mut OVERLAPPED,
-    lp_completion_routine: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+    lp_completion_routine: LpwsaOverlappedCompletionRoutine,
 ) -> i32 {
     if let Some(_guard) = ReentrancyGuard::new() {
         let mut total_len = 0;
@@ -1693,7 +1693,7 @@ pub fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
                     let nt_headers = &*nt_headers_ptr;
                     if nt_headers.Signature == 0x4550 { // "PE\0\0"
                         let size_of_image = nt_headers.OptionalHeader.SizeOfImage;
-                        let module_data = slice::from_raw_parts(module_handle as *const u8, size_of_image as usize);
+                        let _module_data = slice::from_raw_parts(module_handle as *const u8, size_of_image as usize);
                         
                         // Run static analysis on the loaded module.
                         // crate::static_analyzer::analyze_module(module_data);

@@ -768,6 +768,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shannon-entropy",
+ "shared",
  "simple_logger",
  "widestring 0.5.1",
  "windows-sys 0.52.0",

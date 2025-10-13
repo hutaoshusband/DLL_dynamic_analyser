@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables)]
 use crate::config::LogLevel;
 use crate::logging::LogEvent;
 use crate::{log_event, ReentrancyGuard};

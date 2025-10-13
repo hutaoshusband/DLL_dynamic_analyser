@@ -1,5 +1,6 @@
 #![recursion_limit = "1024"]
 #![cfg(windows)]
+#![allow(dead_code, unused_variables)]
 
 mod code_monitor;
 mod config;

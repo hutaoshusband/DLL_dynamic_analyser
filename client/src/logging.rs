@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables)]
 use crate::config::{LogLevel, CONFIG};
 use crate::SUSPICION_SCORE;
 use chrono::{DateTime, Utc};

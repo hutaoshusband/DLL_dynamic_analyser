@@ -1,4 +1,5 @@
 // monitor_lib/src/vmp_dumper.rs
+#![allow(dead_code, unused_variables)]
 
 use crate::config::LogLevel;
 use crate::logging::LogEvent;
@@ -133,7 +134,7 @@ pub fn track_memory_allocation(
 fn analyze_unpacked_code(code: &[u8], base_address: usize) {
     const BITNESS: u32 = 64;
     let mut decoder = Decoder::with_ip(BITNESS, code, base_address as u64, DecoderOptions::NONE);
-    let formatter = NasmFormatter::new();
+    let _formatter = NasmFormatter::new();
 
     for instr in decoder.iter().take(10) { // Analyze first 10 instructions
         // Check for popad (0x61), a common instruction at the end of an unpacker stub.
