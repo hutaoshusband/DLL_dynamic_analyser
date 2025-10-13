@@ -291,110 +291,114 @@ fn shannon_entropy(data: &[u8]) -> f32 {
 }
 
 use pelite::pe64::{Pe, PeFile};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
-fn handle_calculate_entropy(section_name: &str) {
-    debug_log(&format!("Handling CalculateEntropy command for section: {}", section_name));
+// Helper function to safely access and parse the current module's PE file.
+// This encapsulates the repetitive and unsafe logic of reading the PE headers
+// and provides a safe way to operate on the parsed file via a closure.
+fn with_pe_file<F, R>(source_name: &str, closure: F) -> Option<R>
+where
+    F: FnOnce(PeFile) -> R,
+{
     unsafe {
         let base = GetModuleHandleW(std::ptr::null());
         if base == 0 {
             log_event(LogLevel::Error, LogEvent::Error {
-                source: "handle_calculate_entropy".to_string(),
+                source: source_name.to_string(),
                 message: "Failed to get main module handle.".to_string(),
             });
-            return;
+            return None;
         }
 
+        // Manually parse headers to get the image size, as `from_module` is not available.
         let dos_header = &*(base as *const pelite::image::IMAGE_DOS_HEADER);
-        let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
+        if dos_header.e_magic != pelite::image::IMAGE_DOS_SIGNATURE {
+            log_event(LogLevel::Error, LogEvent::Error {
+                source: source_name.to_string(),
+                message: "Invalid DOS signature for main module.".to_string(),
+            });
+            return None;
+        }
+
+        let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize)
+            as *const pelite::image::IMAGE_NT_HEADERS64);
+        if nt_headers.Signature != 0x00004550 { // "PE\0\0"
+             log_event(LogLevel::Error, LogEvent::Error {
+                source: source_name.to_string(),
+                message: "Invalid NT signature for main module.".to_string(),
+            });
+            return None;
+        }
+
         let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
         let image_slice = std::slice::from_raw_parts(base as *const u8, image_size);
 
-        if let Ok(file) = PeFile::from_bytes(image_slice) {
-            for section in file.section_headers() {
-                if let Ok(name) = section.name() {
-                    if name == section_name {
-                        let data = file.get_section_bytes(section).unwrap_or(&[]);
-                        const CHUNK_SIZE: usize = 256;
-                        let entropy = data.chunks(CHUNK_SIZE)
-                            .map(|chunk| shannon_entropy(chunk))
-                            .collect();
-                        log_event(LogLevel::Info, LogEvent::EntropyResult {
-                            name: section_name.to_string(),
-                            entropy,
-                        });
-                        return;
-                    }
-                }
+        match PeFile::from_bytes(image_slice) {
+            Ok(file) => Some(closure(file)),
+            Err(e) => {
+                log_event(LogLevel::Error, LogEvent::Error {
+                    source: source_name.to_string(),
+                    message: format!("Failed to parse PE file from bytes: {}", e),
+                });
+                None
             }
         }
     }
+}
+
+fn handle_calculate_entropy(section_name: &str) {
+    debug_log(&format!("Handling CalculateEntropy for section: {}", section_name));
+    with_pe_file("handle_calculate_entropy", |file| {
+        for section in file.section_headers() {
+            if let Ok(name) = section.name() {
+                if name == section_name {
+                    let data = file.get_section_bytes(section).unwrap_or(&[]);
+                    const CHUNK_SIZE: usize = 256;
+                    let entropy = data.chunks(CHUNK_SIZE)
+                        .map(|chunk| shannon_entropy(chunk))
+                        .collect();
+                    log_event(LogLevel::Info, LogEvent::EntropyResult {
+                        name: section_name.to_string(),
+                        entropy,
+                    });
+                    break;
+                }
+            }
+        }
+    });
 }
 
 fn handle_dump_section(section_name: &str) {
-    debug_log(&format!("Handling DumpSection command for section: {}", section_name));
-    unsafe {
-        let base = GetModuleHandleW(std::ptr::null());
-        if base == 0 {
-            log_event(LogLevel::Error, LogEvent::Error {
-                source: "handle_dump_section".to_string(),
-                message: "Failed to get main module handle.".to_string(),
-            });
-            return;
-        }
-
-        let dos_header = &*(base as *const pelite::image::IMAGE_DOS_HEADER);
-        let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
-        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
-        let image_slice = std::slice::from_raw_parts(base as *const u8, image_size);
-
-        if let Ok(file) = PeFile::from_bytes(image_slice) {
-            for section in file.section_headers() {
-                if let Ok(name) = section.name() {
-                    if name == section_name {
-                        let data = file.get_section_bytes(section).unwrap_or(&[]);
-                        log_event(LogLevel::Info, LogEvent::SectionDump {
-                            name: section_name.to_string(),
-                            data: data.to_vec(),
-                        });
-                        return;
-                    }
+    debug_log(&format!("Handling DumpSection for section: {}", section_name));
+    with_pe_file("handle_dump_section", |file| {
+        for section in file.section_headers() {
+            if let Ok(name) = section.name() {
+                if name == section_name {
+                    let data = file.get_section_bytes(section).unwrap_or(&[]);
+                    log_event(LogLevel::Info, LogEvent::SectionDump {
+                        name: section_name.to_string(),
+                        data: data.to_vec(),
+                    });
+                    break;
                 }
             }
         }
-    }
+    });
 }
-
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
 fn handle_list_sections() {
     debug_log("Handling ListSections command.");
-    unsafe {
-        let base = GetModuleHandleW(std::ptr::null());
-        if base == 0 {
-            log_event(LogLevel::Error, LogEvent::Error {
-                source: "handle_list_sections".to_string(),
-                message: "Failed to get main module handle.".to_string(),
-            });
-            return;
-        }
-
-        let dos_header = &*(base as *const pelite::image::IMAGE_DOS_HEADER);
-        let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize) as *const pelite::image::IMAGE_NT_HEADERS64);
-        let image_size = nt_headers.OptionalHeader.SizeOfImage as usize;
-        let image_slice = std::slice::from_raw_parts(base as *const u8, image_size);
-
-        if let Ok(file) = PeFile::from_bytes(image_slice) {
-            let sections = file.section_headers().iter().map(|s| {
-                SectionInfo {
-                    name: s.name().unwrap_or("").to_string(),
-                    virtual_address: s.VirtualAddress as usize,
-                    virtual_size: s.VirtualSize as usize,
-                    characteristics: s.Characteristics,
-                }
-            }).collect();
-            log_event(LogLevel::Info, LogEvent::SectionList { sections });
-        }
-    }
+    with_pe_file("handle_list_sections", |file| {
+        let sections = file.section_headers().iter().map(|s| {
+            SectionInfo {
+                name: s.name().unwrap_or("").to_string(),
+                virtual_address: s.VirtualAddress as usize,
+                virtual_size: s.VirtualSize as usize,
+                characteristics: s.Characteristics,
+            }
+        }).collect();
+        log_event(LogLevel::Info, LogEvent::SectionList { sections });
+    });
 }
 
 fn get_log_file_path() -> Option<PathBuf> {
@@ -491,8 +495,10 @@ fn initialize_features() {
             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
                 let current_config = CONFIG.features.read().unwrap();
                 unsafe {
-                    if iat { iat_monitor::scan_iat_modifications(); }
-                    if manual_map {
+                    if current_config.iat_scan_enabled {
+                        iat_monitor::scan_iat_modifications();
+                    }
+                    if current_config.manual_map_scan_enabled {
                         scanner::scan_for_manual_mapping();
                         code_monitor::monitor_code_modifications();
                         hardware_bp::check_debug_registers();
@@ -527,11 +533,26 @@ pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserv
         DLL_PROCESS_DETACH => {
             debug_log("DllMain called with DLL_PROCESS_DETACH.");
             SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
+
             // Signal the logging thread to shut down.
             if let Some(sender) = LOG_SENDER.get() {
                 let _ = sender.send(None);
             }
-            debug_log("Shutdown signal sent.");
+
+            // Spawn a dedicated thread to handle the cleanup.
+            // This avoids blocking DllMain while waiting for threads to join.
+            thread::spawn(|| {
+                debug_log("Shutdown thread started.");
+                let mut handles = THREAD_HANDLES.lock().unwrap();
+                // Drain the vector and join each handle. This will block the shutdown
+                // thread (but not DllMain) until the background threads have exited.
+                for handle in handles.drain(..) {
+                    let _ = handle.join();
+                }
+                debug_log("All background threads have been joined.");
+            });
+
+            debug_log("Shutdown process initiated from DllMain.");
         }
         _ => {}
     }
