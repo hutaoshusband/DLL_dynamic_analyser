@@ -11,10 +11,11 @@ mod logging;
 mod scanner;
 mod string_dumper;
 mod vmp_dumper;
-use crate::config::{LogLevel, CONFIG};
+use crate::config::CONFIG;
 use crate::hooks::{cpprest_hook, winapi_hooks};
-use crate::logging::{LogEntry, LogEvent, SectionInfo};
+use crate::logging::create_log_entry;
 use crossbeam_channel::{bounded, Receiver, Sender};
+use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
 use once_cell::sync::OnceCell;
 use shared::{Command, MonitorConfig};
 use std::cell::Cell;
@@ -65,9 +66,8 @@ impl Drop for ReentrancyGuard {
 }
 
 pub fn log_event(level: LogLevel, event: LogEvent) {
-    if level > CONFIG.log_level { return; }
     if let Some(sender) = LOG_SENDER.get() {
-        let entry = LogEntry::new(level, event);
+        let entry = create_log_entry(level, event);
         let _ = sender.try_send(Some(entry));
     }
 }

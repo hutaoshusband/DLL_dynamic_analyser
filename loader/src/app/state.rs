@@ -1,138 +1,14 @@
-use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{
-        atomic::AtomicBool,
-        mpsc::Sender,
-        Arc, Mutex,
-    },
+    sync::{atomic::AtomicBool, mpsc::Sender, Arc, Mutex},
+    thread::JoinHandle,
 };
-
-pub const DLL_NAME: &str = "monitor_lib.dll";
-
-// --- Data Structures ---
-
-use shared::MonitorConfig;
-
-#[derive(serde::Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogLevel {
-    Fatal = 0,
-    Error = 1,
-    Success = 2,
-    Warn = 3,
-    Info = 4,
-    Debug = 5,
-    Trace = 6,
-}
-
-#[derive(serde::Serialize, Deserialize, Debug, Clone)]
-pub struct SectionInfo {
-    pub name: String,
-    pub virtual_address: usize,
-    pub virtual_size: usize,
-    pub characteristics: u32,
-}
-
-#[derive(serde::Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "event_type", content = "details")]
-pub enum LogEvent {
-    Message(String),
-    Initialization {
-        status: String,
-    },
-    Shutdown {
-        status: String,
-    },
-    ApiHook {
-        function_name: String,
-        parameters: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stack_trace: Option<Vec<String>>,
-    },
-    AntiDebugCheck {
-        function_name: String,
-        parameters: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stack_trace: Option<Vec<String>>,
-    },
-    ProcessEnumeration {
-        function_name: String,
-        parameters: serde_json::Value,
-    },
-    MemoryScan {
-        status: String,
-        result: String,
-    },
-    Error {
-        source: String,
-        message: String,
-    },
-    FileOperation {
-        path: String,
-        operation: String,
-        details: String,
-    },
-    VmpSectionFound {
-        module_path: String,
-        section_name: String,
-    },
-    SectionList {
-        sections: Vec<SectionInfo>,
-    },
-    SectionDump {
-        name: String,
-        data: Vec<u8>,
-    },
-    EntropyResult {
-        name: String,
-        entropy: Vec<f32>,
-    },
-}
-
-impl PartialEq for LogEvent {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_string(self).unwrap_or_default()
-            == serde_json::to_string(other).unwrap_or_default()
-    }
-}
-
-#[derive(serde::Serialize, Deserialize, Debug)]
-pub struct LogEntry {
-    #[serde(with = "chrono::serde::ts_seconds")]
-    pub timestamp: DateTime<Utc>,
-    pub level: LogLevel,
-    pub process_id: u32,
-    pub thread_id: u32,
-    pub suspicion_score: usize,
-    #[serde(flatten)]
-    pub event: LogEvent,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stack_trace: Option<Vec<String>>,
-}
-
-impl PartialEq for LogEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.level == other.level && self.event == other.event
-    }
-}
-
-impl LogEntry {
-    pub fn new(level: LogLevel, event: LogEvent) -> Self {
-        Self {
-            timestamp: Utc::now(),
-            level,
-            // These are placeholders, as the loader doesn't have this info directly.
-            // The real values come from the client.
-            process_id: 0,
-            thread_id: 0,
-            suspicion_score: 0,
-            event,
-            stack_trace: None,
-        }
-    }
-}
+use shared::{
+    logging::{LogEntry, LogEvent, LogLevel, SectionInfo},
+    MonitorConfig,
+};
+pub const DLL_NAME: &str = "client.dll";
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -160,6 +36,8 @@ pub struct AppState {
     pub entropy_results: Arc<Mutex<HashMap<String, Vec<f32>>>>,
     pub monitor_config: MonitorConfig,
     pub windows: AppWindows,
+    pub auto_inject_enabled: Arc<AtomicBool>,
+    pub auto_inject_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 pub struct AppWindows {
@@ -209,6 +87,8 @@ impl AppState {
             entropy_results: Arc::new(Mutex::new(HashMap::new())),
             monitor_config: MonitorConfig::default(),
             windows: AppWindows::default(),
+            auto_inject_enabled: Arc::new(AtomicBool::new(false)),
+            auto_inject_thread: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -222,7 +102,7 @@ impl AppState {
                     LogEvent::SectionDump { name, data } => {
                         if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
                             if let Err(e) = std::fs::write(&path, data) {
-                                self.add_log_entry(LogEntry::new(
+                                self.add_log_entry(LogEntry::new_from_loader(
                                     LogLevel::Error,
                                     LogEvent::Error {
                                         source: "GUI".to_string(),
@@ -244,7 +124,7 @@ impl AppState {
                 self.add_log_entry(new_log);
             }
             Err(e) => {
-                let error_log = LogEntry::new(
+                let error_log = LogEntry::new_from_loader(
                     LogLevel::Error,
                     LogEvent::Error {
                         source: "Log Deserialization".to_string(),

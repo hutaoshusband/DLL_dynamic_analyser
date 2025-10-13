@@ -1,6 +1,5 @@
-use crate::config::LogLevel;
+use shared::logging::{LogLevel, LogEvent};
 use crate::log_event;
-use crate::logging::LogEvent;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Memory::{

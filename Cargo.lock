@@ -3092,7 +3092,9 @@ checksum = "b7f4053bd8efd870677b67f018147024c268c1b570459483c73a2c527b98e279"
 name = "shared"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

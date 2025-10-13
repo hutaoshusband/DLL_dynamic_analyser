@@ -1,6 +1,7 @@
 use eframe::egui;
 
-use crate::app::state::{AppState, LogLevel};
+use crate::app::state::AppState;
+use shared::logging::{LogEvent, LogLevel};
 
 pub fn render_log_window(ctx: &egui::Context, state: &mut AppState) {
     if !state.windows.log_window_open {
@@ -35,48 +36,63 @@ pub fn render_log_window(ctx: &egui::Context, state: &mut AppState) {
         });
 }
 
-fn format_log_event(event: &crate::app::state::LogEvent) -> String {
+fn format_log_event(event: &LogEvent) -> String {
     match event {
-        crate::app::state::LogEvent::Message(msg) => msg.clone(),
-        crate::app::state::LogEvent::Initialization { status } => status.clone(),
-        crate::app::state::LogEvent::Shutdown { status } => status.clone(),
-        crate::app::state::LogEvent::ApiHook {
+        LogEvent::Message(msg) => msg.clone(),
+        LogEvent::Initialization { status } => status.clone(),
+        LogEvent::Shutdown { status } => status.clone(),
+        LogEvent::ApiHook {
             function_name,
             parameters,
             ..
         } => format!("API Hook: {} | Params: {}", function_name, parameters),
-        crate::app::state::LogEvent::AntiDebugCheck {
+        LogEvent::AntiDebugCheck {
             function_name,
             parameters,
             ..
         } => format!("Anti-Debug: {} | Params: {}", function_name, parameters),
-        crate::app::state::LogEvent::ProcessEnumeration {
+        LogEvent::ProcessEnumeration {
             function_name,
             parameters,
         } => format!("Process Enum: {} | Params: {}", function_name, parameters),
-        crate::app::state::LogEvent::MemoryScan { status, result } => {
+        LogEvent::MemoryScan { status, result } => {
             format!("Scan: {} -> {}", status, result)
         }
-        crate::app::state::LogEvent::Error { source, message } => {
+        LogEvent::Error { source, message } => {
             format!("ERROR [{}]: {}", source, message)
         }
-        crate::app::state::LogEvent::FileOperation {
+        LogEvent::FileOperation {
             path,
             operation,
             details,
         } => format!("File Op: {} on {} | Details: {}", operation, path, details),
-        crate::app::state::LogEvent::VmpSectionFound {
+        LogEvent::VmpSectionFound {
             module_path,
             section_name,
         } => format!("VMP Section: {} in {}", section_name, module_path),
-        crate::app::state::LogEvent::SectionList { sections } => {
+        LogEvent::SectionList { sections } => {
             format!("Received section list with {} entries.", sections.len())
         }
-        crate::app::state::LogEvent::SectionDump { name, data } => {
+        LogEvent::SectionDump { name, data } => {
             format!("Dumped section '{}' ({} bytes).", name, data.len())
         }
-        crate::app::state::LogEvent::EntropyResult { name, .. } => {
+        LogEvent::EntropyResult { name, .. } => {
             format!("Calculated entropy for section '{}'.", name)
+        }
+        LogEvent::ModuleDump { module_name, data } => {
+            format!("Dumped module '{}' ({} bytes).", module_name, data.len())
+        }
+        LogEvent::VmpTrace { message, details } => {
+            format!("VMP Trace: {} | Details: {}", message, details)
+        }
+        LogEvent::StaticAnalysis { finding, details } => {
+            format!("Static Analysis: {} | Details: {}", finding, details)
+        }
+        LogEvent::StringDump { address, value, .. } => {
+            format!("String at {:#x}: {}", address, value)
+        }
+        LogEvent::UnpackerActivity { source_address, finding, details } => {
+            format!("Unpacker activity at {:#x}: {} | Details: {}", source_address, finding, details)
         }
     }
 }

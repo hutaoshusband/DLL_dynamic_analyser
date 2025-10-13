@@ -1,6 +1,5 @@
-use crate::config::LogLevel;
+use shared::logging::{LogLevel, LogEvent};
 use crate::log_event;
-use crate::logging::LogEvent;
 use serde_json::json;
 use windows_sys::Win32::System::Diagnostics::Debug::{CONTEXT, GetThreadContext};
 use windows_sys::Win32::System::Threading::{GetCurrentThread};

@@ -1,6 +1,5 @@
-use crate::config::LogLevel;
+use shared::logging::{LogLevel, LogEvent};
 use crate::log_event;
-use crate::logging::LogEvent;
 use crate::scanner;
 use lazy_static::lazy_static;
 use retour::static_detour;

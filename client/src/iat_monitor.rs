@@ -1,6 +1,5 @@
-use crate::config::LogLevel;
+use shared::logging::{LogLevel, LogEvent};
 use crate::log_event;
-use crate::logging::LogEvent;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
     TH32CS_SNAPMODULE32,

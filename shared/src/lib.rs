@@ -1,3 +1,5 @@
+pub mod logging;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -21,6 +23,8 @@ pub struct MonitorConfig {
     pub crypto_hooks_enabled: bool,
     pub log_network_data: bool,
     pub suspicion_threshold: u32,
+    pub stack_trace_on_error: bool,
+    pub stack_trace_frame_limit: usize,
     // Add a boolean for each hook
     pub hook_open_process: bool,
     pub hook_write_process_memory: bool,
@@ -101,6 +105,8 @@ impl Default for MonitorConfig {
             crypto_hooks_enabled: true,
             log_network_data: false,
             suspicion_threshold: 10,
+            stack_trace_on_error: true,
+            stack_trace_frame_limit: 16,
             // Set all hooks to true by default
             hook_open_process: true,
             hook_write_process_memory: true,

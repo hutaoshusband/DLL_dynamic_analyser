@@ -2,8 +2,7 @@
 // for strings, which can reveal interesting information about a program's
 // behavior, such as hidden commands, URLs, or configuration data.
 // It will run in a background thread.
-use crate::config::LogLevel;
-use crate::logging::LogEvent;
+use shared::logging::{LogLevel, LogEvent};
 use crate::{log_event, ReentrancyGuard};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
