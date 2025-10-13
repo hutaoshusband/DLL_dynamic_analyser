@@ -18,6 +18,16 @@ pub struct ModuleInfo {
     pub size: u32,
 }
 
+// Represents the currently active main tab in the GUI.
+#[derive(PartialEq, Clone, Copy)]
+pub enum ActiveTab {
+    Launcher,
+    Logs,
+    MemoryAnalysis,
+    Hooking,
+    Network,
+}
+
 pub struct AppState {
     pub target_process_name: String,
     pub manual_injection_pid: String,
@@ -36,31 +46,9 @@ pub struct AppState {
     pub entropy_results: Arc<Mutex<HashMap<String, Vec<f32>>>>,
     pub selected_preset: Preset,
     pub monitor_config: MonitorConfig,
-    pub windows: AppWindows,
+    pub active_tab: ActiveTab,
     pub auto_inject_enabled: Arc<AtomicBool>,
     pub auto_inject_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
-}
-
-pub struct AppWindows {
-    pub log_window_open: bool,
-    pub memory_analysis_window_open: bool,
-    pub entropy_viewer_window_open: bool,
-    pub hooking_control_window_open: bool,
-    pub network_activity_window_open: bool,
-    pub launcher_window_open: bool,
-}
-
-impl Default for AppWindows {
-    fn default() -> Self {
-        Self {
-            log_window_open: true,
-            memory_analysis_window_open: true,
-            entropy_viewer_window_open: false,
-            hooking_control_window_open: true,
-            network_activity_window_open: false,
-            launcher_window_open: true,
-        }
-    }
 }
 
 impl AppState {
@@ -90,7 +78,7 @@ impl AppState {
             entropy_results: Arc::new(Mutex::new(HashMap::new())),
             selected_preset: default_preset,
             monitor_config: MonitorConfig::from_preset(default_preset),
-            windows: AppWindows::default(),
+            active_tab: ActiveTab::Launcher,
             auto_inject_enabled: Arc::new(AtomicBool::new(false)),
             auto_inject_thread: Arc::new(Mutex::new(None)),
         }

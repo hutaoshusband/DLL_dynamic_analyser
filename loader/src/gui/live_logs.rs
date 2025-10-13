@@ -1,38 +1,30 @@
-use eframe::egui;
+use eframe::egui::{self, Ui};
 
 use crate::app::state::AppState;
 use shared::logging::{LogEvent, LogLevel};
 
-pub fn render_log_window(ctx: &egui::Context, state: &mut AppState) {
-    if !state.windows.log_window_open {
-        return;
-    }
-
-    egui::Window::new("Live Logs")
-        .open(&mut state.windows.log_window_open)
-        .show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for (log, count) in &state.logs {
-                        let color = match log.level {
-                            LogLevel::Fatal | LogLevel::Error => egui::Color32::RED,
-                            LogLevel::Success => egui::Color32::GREEN,
-                            LogLevel::Warn => egui::Color32::from_rgb(255, 165, 0),
-                            LogLevel::Info => egui::Color32::YELLOW,
-                            _ => egui::Color32::LIGHT_BLUE,
-                        };
-                        let mut log_text = format!(
-                            "[{}] {}",
-                            log.timestamp.format("%H:%M:%S"),
-                            format_log_event(&log.event)
-                        );
-                        if *count > 1 {
-                            log_text = format!("({}x) {}", count, log_text);
-                        }
-                        ui.colored_label(color, log_text);
-                    }
-                });
+pub fn render_log_tab(ui: &mut Ui, state: &mut AppState) {
+    egui::ScrollArea::vertical()
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            for (log, count) in &state.logs {
+                let color = match log.level {
+                    LogLevel::Fatal | LogLevel::Error => egui::Color32::RED,
+                    LogLevel::Success => egui::Color32::GREEN,
+                    LogLevel::Warn => egui::Color32::from_rgb(255, 165, 0),
+                    LogLevel::Info => egui::Color32::YELLOW,
+                    _ => egui::Color32::LIGHT_BLUE,
+                };
+                let mut log_text = format!(
+                    "[{}] {}",
+                    log.timestamp.format("%H:%M:%S"),
+                    format_log_event(&log.event)
+                );
+                if *count > 1 {
+                    log_text = format!("({}x) {}", count, log_text);
+                }
+                ui.colored_label(color, log_text);
+            }
         });
 }
 
