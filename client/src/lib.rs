@@ -9,15 +9,17 @@ mod hooks;
 mod iat_monitor;
 mod logging;
 mod scanner;
+mod security;
 mod string_dumper;
 mod vmp_dumper;
 use crate::config::CONFIG;
 use crate::hooks::{cpprest_hook, winapi_hooks};
 use crate::logging::create_log_entry;
+use crate::security::SecurityAttributes;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
 use once_cell::sync::OnceCell;
-use shared::Command;
+use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
+use shared::{Command, COMMANDS_PIPE_NAME, LOGS_PIPE_NAME};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -29,31 +31,25 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use widestring::U16CString;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE,
+    CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE, ERROR_MORE_DATA,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
+    PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
-use windows_sys::Win32::Security::{
-    SECURITY_ATTRIBUTES,
-    PSECURITY_DESCRIPTOR,
+use windows_sys::Win32::Storage::FileSystem::{
+    ReadFile, WriteFile, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
 };
-use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW
-};
-use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
 
 
 // --- Globals ---
 pub static SUSPICION_SCORE: AtomicUsize = AtomicUsize::new(0);
 static LOG_SENDER: OnceCell<Sender<Option<LogEntry>>> = OnceCell::new();
-static CMD_PIPE_HANDLE: OnceCell<isize> = OnceCell::new();
-static LOG_PIPE_HANDLE: OnceCell<isize> = OnceCell::new();
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 static THREAD_HANDLES: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+static DEBUG_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 thread_local!(static IN_HOOK: Cell<bool> = Cell::new(false));
 
@@ -133,6 +129,7 @@ fn handle_dump_module(module_name: &str) {
 
 // A simple, panic-safe file logger for early-stage debugging.
 fn debug_log(message: &str) {
+    let _guard = DEBUG_LOG_MUTEX.lock().unwrap();
     let pid = unsafe { GetCurrentProcessId() };
     let log_path = std::env::temp_dir().join(format!("monitor_lib_debug_{}.log", pid));
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
@@ -141,18 +138,15 @@ fn debug_log(message: &str) {
     }
 }
 
-/// Reads a single, newline-terminated message from the pipe.
-/// This function will block until a complete message is received or an error occurs.
-fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<String, ()> {
-    let mut read_buf = [0u8; 1024];
+// Reads a single, newline-terminated message from the pipe, handling ERROR_MORE_DATA.
+fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<String, u32> {
+    let mut read_buf = [0u8; 1024]; // A smaller, reasonable buffer for each read call.
     loop {
-        // If a complete message is already in the buffer, return it.
         if let Some(newline_pos) = buffer.find('\n') {
             let message = buffer.drain(..=newline_pos).collect();
             return Ok(message);
         }
 
-        // Otherwise, read more data from the pipe.
         let mut bytes_read = 0;
         let success = unsafe {
             ReadFile(
@@ -162,148 +156,166 @@ fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<Str
                 &mut bytes_read,
                 std::ptr::null_mut(),
             )
-        } != 0;
+        };
 
-        if success && bytes_read > 0 {
-            buffer.push_str(&String::from_utf8_lossy(&read_buf[..bytes_read as usize]));
+        let error = unsafe { GetLastError() };
+
+        if success != 0 || error == ERROR_MORE_DATA {
+            if bytes_read > 0 {
+                buffer.push_str(&String::from_utf8_lossy(&read_buf[..bytes_read as usize]));
+            }
+            if error != ERROR_MORE_DATA {
+                 // If success was true but there's no more data, we might need to wait,
+                 // but for message-based pipes, we should get the whole message or an error.
+                 // If we have a newline, the loop start will catch it. If not, continue reading.
+                 continue;
+            }
         } else {
-            // Error or pipe closed
-            let error = unsafe { GetLastError() };
-            debug_log(&format!("ReadFile failed with error: {}", error));
-            return Err(());
+            // A real error occurred
+            return Err(error);
         }
     }
 }
 
-// Helper function to create and connect a named pipe server.
-fn create_pipe_server(pipe_name: &str) -> Option<isize> {
-    let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
-    let sddl = U16CString::from_str("D:(A;OICI;GRGW;;;AU)").unwrap();
-    let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut security_descriptor,
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
-        debug_log(&format!(
-            "Failed to create security descriptor for {}. Error: {}",
-            pipe_name,
-            unsafe { GetLastError() }
-        ));
-        return None;
-    }
+/// The main initialization thread. Creates the pipe server, waits for config, and starts features.
+fn main_initialization_thread() {
+    debug_log("main_initialization_thread started.");
 
-    let mut sa = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: security_descriptor,
-        bInheritHandle: 0,
+    // --- Create Pipes ---
+    let mut sa = unsafe {
+        match SecurityAttributes::new() {
+            Some(sa) => sa,
+            None => {
+                debug_log(&format!(
+                    "Failed to create security attributes. Error: {}",
+                    GetLastError()
+                ));
+                return;
+            }
+        }
     };
 
-    let pipe_handle = unsafe {
+    let commands_pipe_handle = unsafe {
+        let wide_pipe_name = U16CString::from_str(COMMANDS_PIPE_NAME).unwrap();
         CreateNamedPipeW(
             wide_pipe_name.as_ptr(),
-            PIPE_ACCESS_DUPLEX, // Keep as duplex for simplicity, can be optimized later
-            PIPE_TYPE_BYTE | PIPE_WAIT,
-            1,
-            4096,
-            4096,
-            0,
-            &mut sa,
+            PIPE_ACCESS_INBOUND, // Client reads commands from this pipe
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            1, 8192, 8192, 0,
+            &mut sa.attributes,
         )
     };
 
-    if pipe_handle == INVALID_HANDLE_VALUE {
+    if commands_pipe_handle == INVALID_HANDLE_VALUE {
         debug_log(&format!(
-            "Failed to create named pipe {}. Error: {}",
-            pipe_name,
+            "Failed to create commands pipe. Error: {}",
             unsafe { GetLastError() }
         ));
-        return None;
+        return;
     }
+    debug_log("Commands pipe created successfully.");
 
-    debug_log(&format!(
-        "Pipe {} created successfully. Waiting for client...",
-        pipe_name
-    ));
+    let logs_pipe_handle = unsafe {
+        let wide_pipe_name = U16CString::from_str(LOGS_PIPE_NAME).unwrap();
+        CreateNamedPipeW(
+            wide_pipe_name.as_ptr(),
+            PIPE_ACCESS_OUTBOUND, // Client writes logs to this pipe
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            1, 8192, 8192, 0,
+            &mut sa.attributes,
+        )
+    };
 
-    if unsafe { ConnectNamedPipe(pipe_handle, std::ptr::null_mut()) } == 0 {
+    if logs_pipe_handle == INVALID_HANDLE_VALUE {
+        debug_log(&format!("Failed to create logs pipe. Error: {}", unsafe {
+            GetLastError()
+        }));
+        unsafe { CloseHandle(commands_pipe_handle) };
+        return;
+    }
+    debug_log("Logs pipe created successfully.");
+
+    // --- Connect Pipes ---
+    debug_log("Waiting for loader to connect to both pipes...");
+    let commands_connected = unsafe { ConnectNamedPipe(commands_pipe_handle, std::ptr::null_mut()) } != 0;
+    let logs_connected = unsafe { ConnectNamedPipe(logs_pipe_handle, std::ptr::null_mut()) } != 0;
+
+    if !commands_connected || !logs_connected {
         debug_log(&format!(
-            "Failed to connect named pipe {}. Error: {}",
-            pipe_name,
+            "Failed to connect named pipes. Commands: {} (err {}), Logs: {} (err {}).",
+            commands_connected,
+            unsafe { GetLastError() },
+            logs_connected,
             unsafe { GetLastError() }
         ));
         unsafe {
-            CloseHandle(pipe_handle);
+            CloseHandle(commands_pipe_handle);
+            CloseHandle(logs_pipe_handle);
         }
-        return None;
+        return;
     }
+    debug_log("Both pipes connected.");
 
-    debug_log(&format!("Pipe {} connected.", pipe_name));
-    Some(pipe_handle)
-}
-
-/// The main initialization thread. Creates pipes, waits for connections, and starts worker threads.
-fn main_initialization_thread() {
-    debug_log("main_initialization_thread started.");
-    let pid = unsafe { GetCurrentProcessId() };
-
-    // 1. Create and connect the LOG pipe
-    let log_pipe_name = format!(r"\\.\pipe\cs2_monitor_log_{}", pid);
-    let log_pipe_handle = match create_pipe_server(&log_pipe_name) {
-        Some(handle) => handle,
-        None => return, // Error already logged
-    };
-    LOG_PIPE_HANDLE.set(log_pipe_handle).expect("Log pipe handle already set");
-
-    // We have a log pipe, so we can start the central log event handler
-    let (sender, receiver) = bounded(1024);
-    LOG_SENDER.set(sender).expect("Log sender already set");
-
-    // This thread takes log events and writes them to the file and the log pipe
-    let log_thread = thread::spawn(move || logging_thread_main(receiver, log_pipe_handle));
-    THREAD_HANDLES.lock().unwrap().push(log_thread);
-    debug_log("Logging thread started.");
-
-    // 2. Create and connect the CMD pipe
-    let cmd_pipe_name = format!(r"\\.\pipe\cs2_monitor_cmd_{}", pid);
-    let cmd_pipe_handle = match create_pipe_server(&cmd_pipe_name) {
-        Some(handle) => handle,
-        None => return, // Error already logged
-    };
-    CMD_PIPE_HANDLE.set(cmd_pipe_handle).expect("Cmd pipe handle already set");
-
-    // 3. Read initial config from CMD pipe and start command listener
+    // --- Unified Config/Command Handling ---
     let mut message_buffer = String::new();
-    if let Ok(config_message) = read_message_from_pipe(cmd_pipe_handle, &mut message_buffer) {
-        match serde_json::from_str::<Command>(config_message.trim()) {
-            Ok(Command::UpdateConfig(config)) => {
-                debug_log("Initial config command parsed successfully.");
-                *CONFIG.features.write().unwrap() = config;
+    match read_message_from_pipe(commands_pipe_handle, &mut message_buffer) {
+        Ok(config_message) => {
+            match serde_json::from_str::<Command>(config_message.trim()) {
+                Ok(Command::UpdateConfig(config)) => {
+                    debug_log(&format!(
+                        "Initial config parsed. Loader path: '{}'",
+                        &config.loader_path
+                    ));
+                    let cloned_config = config.clone();
+                    *CONFIG.features.write().unwrap() = config;
 
-                // Start the command listener thread with the CMD pipe
-                let command_thread = thread::spawn(move || command_listener_thread(cmd_pipe_handle, message_buffer));
-                THREAD_HANDLES.lock().unwrap().push(command_thread);
+                    let (sender, receiver) = bounded(1024);
+                    LOG_SENDER.set(sender).expect("Log sender already set");
 
-                debug_log("Starting feature initialization...");
-                initialize_features();
-                debug_log("Feature initialization returned.");
-            },
-            Ok(_) => {
-                debug_log("Received a valid command, but it was not the initial UpdateConfig.");
-                unsafe { CloseHandle(cmd_pipe_handle); }
-            },
-            Err(e) => {
-                debug_log(&format!("Failed to parse initial config command: {}. Raw: '{}'", e, config_message));
-                unsafe { CloseHandle(cmd_pipe_handle); }
+                    // Spawn threads with their dedicated pipes
+                    let command_thread = thread::spawn(move || {
+                        command_listener_thread(commands_pipe_handle, message_buffer)
+                    });
+                    let log_thread =
+                        thread::spawn(move || logging_thread_main(receiver, logs_pipe_handle));
+
+                    let mut handles = THREAD_HANDLES.lock().unwrap();
+                    handles.push(log_thread);
+                    handles.push(command_thread);
+
+                    debug_log("Starting feature initialization...");
+                    initialize_features(cloned_config);
+                    debug_log("Feature initialization returned.");
+                }
+                Ok(_) => {
+                    debug_log("Received a valid command, but it was not the initial UpdateConfig.");
+                    unsafe {
+                        CloseHandle(commands_pipe_handle);
+                        CloseHandle(logs_pipe_handle);
+                    }
+                }
+                Err(e) => {
+                    debug_log(&format!(
+                        "Failed to parse initial config command: {}. Raw: '{}'",
+                        e, config_message
+                    ));
+                    unsafe {
+                        CloseHandle(commands_pipe_handle);
+                        CloseHandle(logs_pipe_handle);
+                    }
+                }
             }
         }
-    } else {
-        debug_log("Failed to read initial config message from cmd pipe.");
-        unsafe { CloseHandle(cmd_pipe_handle); }
+        Err(error) => {
+            debug_log(&format!(
+                "Failed to read initial config message from pipe. Error: {}",
+                error
+            ));
+            unsafe {
+                CloseHandle(commands_pipe_handle);
+                CloseHandle(logs_pipe_handle);
+            }
+        }
     }
     debug_log("main_initialization_thread finished.");
 }
@@ -344,12 +356,18 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
                 if error != windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
                      debug_log(&format!("Pipe read failed in command listener with error: {}. Shutting down.", error));
                 }
-                SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
                 break;
             }
         }
     }
     debug_log("Command listener thread finished.");
+    // The pipe handle is now owned by the main initialization thread's scope
+    // and will be closed when that thread finishes. We just disconnect here.
+    if pipe_handle != INVALID_HANDLE_VALUE {
+        unsafe {
+            DisconnectNamedPipe(pipe_handle);
+        }
+    }
 }
 
 fn shannon_entropy(data: &[u8]) -> f32 {
@@ -480,75 +498,91 @@ fn handle_list_sections() {
     });
 }
 
-fn get_log_file_path() -> Option<PathBuf> {
-    const MAX_PATH: usize = 260;
-    let mut path_buf = [0u16; MAX_PATH];
-    let result = unsafe {
-        SHGetFolderPathW(
-            0,
-            CSIDL_LOCAL_APPDATA as i32,
-            0,
-            0,
-            path_buf.as_mut_ptr(),
-        )
-    };
-
-    if result == 0 { // S_OK
-        let path_len = path_buf.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
-        let log_dir = PathBuf::from(String::from_utf16_lossy(&path_buf[..path_len]));
-
-        let mut dir = log_dir.join("cs2_creator");
-        dir.push("logs");
-        if fs::create_dir_all(&dir).is_err() {
-            return None;
-        }
-
-        let pid = unsafe { GetCurrentProcessId() };
-        Some(dir.join(format!("log_{}.txt", pid)))
-    } else {
-        None
-    }
-}
-
-
 fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {
-    let mut log_file: Option<File> = {
-        let _guard = ReentrancyGuard::new();
-        if let Some(log_path) = get_log_file_path() {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)
-                .ok()
-        } else {
-            None
-        }
-    };
+    // Use the loader_path from the global config to create log files.
+    let config = CONFIG.features.read().unwrap();
+    let base_path = PathBuf::from(&config.loader_path);
+
+    let mut hook_log_file: Option<File> = None;
+    let mut debug_log_file: Option<File> = None;
+
+    let hook_log_path = base_path.join("logs").join("hook_logs");
+    if fs::create_dir_all(&hook_log_path).is_ok() {
+        let log_file_path = hook_log_path.join("hook_log.json");
+        hook_log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file_path)
+            .ok();
+    }
+
+    let debug_log_path = base_path.join("logs").join("debug");
+    if fs::create_dir_all(&debug_log_path).is_ok() {
+        let log_file_path = debug_log_path.join("debug_log.txt");
+        debug_log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file_path)
+            .ok();
+    }
+    // Drop the read lock so other threads can access the config.
+    drop(config);
 
     while let Ok(Some(log_entry)) = receiver.recv() {
-        if let Ok(json_string) = serde_json::to_string(&log_entry) {
-            let formatted_message = format!("{}\n", json_string);
-            let bytes = formatted_message.as_bytes();
+        // Always send to the pipe if it's valid
+        if pipe_handle != INVALID_HANDLE_VALUE {
+            if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                let formatted_message = format!("{}\n", json_string);
+                let bytes = formatted_message.as_bytes();
+                let mut bytes_written = 0;
+                let success = unsafe {
+                    WriteFile(
+                        pipe_handle,
+                        bytes.as_ptr(),
+                        bytes.len() as u32,
+                        &mut bytes_written,
+                        std::ptr::null_mut(),
+                    )
+                };
 
-            if let Some(_guard) = ReentrancyGuard::new() {
-                if let Some(file) = log_file.as_mut() {
-                    let _ = file.write_all(bytes);
-                    let _ = file.flush();
+                if success == 0 {
+                    let error = unsafe { GetLastError() };
+                    debug_log(&format!(
+                        "Failed to write log to pipe. Wrote {}/{}. Error: {}",
+                        bytes_written,
+                        bytes.len(),
+                        error
+                    ));
                 }
-                if pipe_handle != INVALID_HANDLE_VALUE {
-                    unsafe {
-                        WriteFile(pipe_handle, bytes.as_ptr(), bytes.len() as u32, &mut 0, std::ptr::null_mut());
+            }
+        }
+
+        // Write to the appropriate log file
+        if let Some(_guard) = ReentrancyGuard::new() {
+            match log_entry.level {
+                LogLevel::Debug => {
+                    if let Some(file) = debug_log_file.as_mut() {
+                        if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                            let _ = writeln!(file, "{}", json_string);
+                        }
+                    }
+                }
+                _ => {
+                    // All other levels go to the hook log
+                    if let Some(file) = hook_log_file.as_mut() {
+                        if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                            let _ = writeln!(file, "{}", json_string);
+                        }
                     }
                 }
             }
         }
     }
-
 }
 
-fn initialize_features() {
-    let config = CONFIG.features.read().unwrap();
-    log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", *config) });
+use shared::MonitorConfig;
+fn initialize_features(config: MonitorConfig) {
+    log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", config) });
 
     let addr = &CONFIG.termination_allowed as *const _ as usize;
     log_event(LogLevel::Debug, LogEvent::Initialization { status: format!("TERMINATION_FLAG_ADDR:{}", addr) });
@@ -568,22 +602,20 @@ fn initialize_features() {
         scanner_threads.push(thread::spawn(string_dumper::start_string_dumper));
     }
     if config.iat_scan_enabled || config.manual_map_scan_enabled {
-        let iat = config.iat_scan_enabled;
-        let manual_map = config.manual_map_scan_enabled;
+        let iat_enabled = config.iat_scan_enabled;
+        let manual_map_enabled = config.manual_map_scan_enabled;
         let scanner_handle = thread::spawn(move || {
             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
-                let current_config = CONFIG.features.read().unwrap();
-                unsafe {
-                    if current_config.iat_scan_enabled {
-                        iat_monitor::scan_iat_modifications();
-                    }
-                    if current_config.manual_map_scan_enabled {
+                if iat_enabled {
+                    unsafe { iat_monitor::scan_iat_modifications(); }
+                }
+                if manual_map_enabled {
+                    unsafe {
                         scanner::scan_for_manual_mapping();
                         code_monitor::monitor_code_modifications();
                         hardware_bp::check_debug_registers();
                     }
                 }
-                drop(current_config); // Release the lock
                 thread::sleep(Duration::from_secs(5));
             }
         });
@@ -612,20 +644,6 @@ pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserv
         DLL_PROCESS_DETACH => {
             debug_log("DllMain called with DLL_PROCESS_DETACH.");
             SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-
-            // Disconnect and close the named pipes.
-            if let Some(pipe_handle) = CMD_PIPE_HANDLE.get() {
-                unsafe {
-                    DisconnectNamedPipe(*pipe_handle);
-                    CloseHandle(*pipe_handle);
-                }
-            }
-            if let Some(pipe_handle) = LOG_PIPE_HANDLE.get() {
-                unsafe {
-                    DisconnectNamedPipe(*pipe_handle);
-                    CloseHandle(*pipe_handle);
-                }
-            }
 
             // Signal the logging thread to shut down.
             if let Some(sender) = LOG_SENDER.get() {

@@ -36,8 +36,8 @@ pub struct AppState {
     pub logs: Vec<(LogEntry, usize)>,
     pub process_id: Arc<Mutex<Option<u32>>>,
     pub process_handle: Arc<Mutex<Option<isize>>>,
-    pub cmd_pipe_handle: Arc<Mutex<Option<isize>>>,
-    pub log_pipe_handle: Arc<Mutex<Option<isize>>>,
+    pub commands_pipe_handle: Arc<Mutex<Option<isize>>>,
+    pub logs_pipe_handle: Arc<Mutex<Option<isize>>>,
     pub is_process_running: Arc<AtomicBool>,
     pub injection_status: Arc<Mutex<String>>,
     pub modules: Arc<Mutex<Vec<ModuleInfo>>>,
@@ -54,12 +54,20 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(log_sender: Sender<String>) -> Self {
-        let dll_path = std::env::current_exe()
-            .ok()
+        let exe_path = std::env::current_exe().ok();
+        let dll_path = exe_path
+            .as_ref()
             .and_then(|p| p.parent().map(|p| p.join(DLL_NAME)))
             .filter(|p| p.exists());
 
         let default_preset = Preset::default();
+        let mut monitor_config = MonitorConfig::from_preset(default_preset);
+
+        // Set the loader_path in the config
+        if let Some(path) = exe_path.as_ref().and_then(|p| p.parent()) {
+            monitor_config.loader_path = path.to_string_lossy().to_string();
+        }
+
 
         Self {
             target_process_name: "cs2.exe".to_owned(),
@@ -69,8 +77,8 @@ impl AppState {
             logs: Vec::new(),
             process_id: Arc::new(Mutex::new(None)),
             process_handle: Arc::new(Mutex::new(None)),
-            cmd_pipe_handle: Arc::new(Mutex::new(None)),
-            log_pipe_handle: Arc::new(Mutex::new(None)),
+            commands_pipe_handle: Arc::new(Mutex::new(None)),
+            logs_pipe_handle: Arc::new(Mutex::new(None)),
             is_process_running: Arc::new(AtomicBool::new(false)),
             injection_status: Arc::new(Mutex::new("Not Injected".to_string())),
             modules: Arc::new(Mutex::new(Vec::new())),
@@ -79,7 +87,7 @@ impl AppState {
             selected_section_name: None,
             entropy_results: Arc::new(Mutex::new(HashMap::new())),
             selected_preset: default_preset,
-            monitor_config: MonitorConfig::from_preset(default_preset),
+            monitor_config,
             active_tab: ActiveTab::Launcher,
             auto_inject_enabled: Arc::new(AtomicBool::new(false)),
             auto_inject_thread: Arc::new(Mutex::new(None)),

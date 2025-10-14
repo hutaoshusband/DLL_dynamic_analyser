@@ -21,11 +21,11 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
     let target_process_name = state.target_process_name.clone();
     let dll_path = state.dll_path.clone();
     let log_sender = state.log_sender.clone();
-    let monitor_config = state.monitor_config;
+    let monitor_config = state.monitor_config.clone();
     let process_id = state.process_id.clone();
     let process_handle = state.process_handle.clone();
-    let cmd_pipe_handle = state.cmd_pipe_handle.clone();
-    let log_pipe_handle = state.log_pipe_handle.clone();
+    let commands_pipe_handle = state.commands_pipe_handle.clone();
+    let logs_pipe_handle = state.logs_pipe_handle.clone();
     let injection_status = state.injection_status.clone();
 
     let handle = thread::spawn(move || {
@@ -37,11 +37,11 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
                         Some(target_process_name.as_str()),
                         None,
                         &dll_path,
-                        monitor_config,
+                        monitor_config.clone(),
                         process_id.clone(),
                         process_handle.clone(),
-                        cmd_pipe_handle.clone(),
-                        log_pipe_handle.clone(),
+                        commands_pipe_handle.clone(),
+                        logs_pipe_handle.clone(),
                         is_process_running.clone(),
                         injection_status.clone(),
                     );
@@ -62,8 +62,8 @@ pub fn start_analysis_thread(
     config: MonitorConfig,
     pid_arc: Arc<Mutex<Option<u32>>>,
     handle_arc: Arc<Mutex<Option<isize>>>,
-    cmd_pipe_arc: Arc<Mutex<Option<isize>>>,
-    log_pipe_arc: Arc<Mutex<Option<isize>>>,
+    commands_pipe_arc: Arc<Mutex<Option<isize>>>,
+    logs_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
 ) {
@@ -77,8 +77,8 @@ pub fn start_analysis_thread(
             config,
             pid_arc,
             handle_arc,
-            cmd_pipe_arc,
-            log_pipe_arc,
+            commands_pipe_arc,
+            logs_pipe_arc,
             running_arc,
             status_arc,
         );
@@ -93,8 +93,8 @@ fn run_analysis(
     config: MonitorConfig,
     pid_arc: Arc<Mutex<Option<u32>>>,
     handle_arc: Arc<Mutex<Option<isize>>>,
-    cmd_pipe_arc: Arc<Mutex<Option<isize>>>,
-    log_pipe_arc: Arc<Mutex<Option<isize>>>,
+    commands_pipe_arc: Arc<Mutex<Option<isize>>>,
+    logs_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
 ) {
@@ -123,21 +123,23 @@ fn run_analysis(
             *handle_arc.lock().unwrap() = Some(handle);
             thread::sleep(Duration::from_millis(500)); // Wait for DLL to initialize
 
-            if communication::setup_communication(
+            if communication::connect_and_send_config(
                 pid,
                 &config,
-                cmd_pipe_arc.clone(),
-                log_pipe_arc.clone(),
+                commands_pipe_arc.clone(),
+                logs_pipe_arc.clone(),
                 status_arc.clone(),
                 logger.clone(),
             ) {
-                // Block the analysis thread until the process terminates.
-                // This is crucial to keep the pipe handle alive.
-                unsafe { WaitForSingleObject(handle, u32::MAX) };
-                if running_arc.load(Ordering::SeqCst) {
-                    *status_arc.lock().unwrap() = "Process terminated.".to_string();
-                    running_arc.store(false, Ordering::SeqCst);
-                }
+                let running_clone = running_arc.clone();
+                let status_clone = status_arc.clone();
+                thread::spawn(move || {
+                    unsafe { WaitForSingleObject(handle, u32::MAX) };
+                    if running_clone.load(Ordering::SeqCst) {
+                        *status_clone.lock().unwrap() = "Process terminated.".to_string();
+                        running_clone.store(false, Ordering::SeqCst);
+                    }
+                });
             } else {
                 running_arc.store(false, Ordering::SeqCst);
             }
