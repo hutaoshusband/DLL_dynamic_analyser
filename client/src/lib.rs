@@ -196,18 +196,33 @@ fn main_initialization_thread() {
     }
     debug_log("Pipe connected.");
 
-    let mut buffer = [0u8; 1024];
+    // --- Read Config ---
+    // First, read the 4-byte size prefix.
+    let mut size_buffer = [0u8; 4];
     let mut bytes_read = 0;
-    let success = unsafe {
-        ReadFile(pipe_handle, buffer.as_mut_ptr() as _, buffer.len() as u32, &mut bytes_read, std::ptr::null_mut())
+    let mut success = unsafe {
+        ReadFile(pipe_handle, size_buffer.as_mut_ptr() as _, 4, &mut bytes_read, std::ptr::null_mut())
     } != 0;
 
-    if success && bytes_read > 0 {
-        let config_str = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
-        debug_log(&format!("Received config string: {}", config_str));
-        if let Ok(config) = serde_json::from_str::<MonitorConfig>(&config_str) {
+    if !success || bytes_read != 4 {
+        debug_log(&format!("Failed to read config size from pipe. Read {} bytes. Error: {}", bytes_read, unsafe { GetLastError() }));
+        unsafe { CloseHandle(pipe_handle); }
+        return;
+    }
+
+    let config_size = u32::from_ne_bytes(size_buffer);
+    debug_log(&format!("Expecting config of size: {}", config_size));
+
+    // Now, read the actual config data.
+    let mut config_buffer = vec![0u8; config_size as usize];
+    bytes_read = 0;
+    success = unsafe {
+        ReadFile(pipe_handle, config_buffer.as_mut_ptr() as _, config_size, &mut bytes_read, std::ptr::null_mut())
+    } != 0;
+
+    if success && bytes_read == config_size {
+        if let Ok(config) = serde_json::from_slice::<MonitorConfig>(&config_buffer) {
             debug_log("Config parsed successfully.");
-            // Store the initial config
             *CONFIG.features.write().unwrap() = config;
 
             let (sender, receiver) = bounded(1024);
@@ -224,11 +239,11 @@ fn main_initialization_thread() {
             initialize_features();
             debug_log("Feature initialization returned.");
         } else {
-            debug_log("Failed to parse config string.");
+            debug_log("Failed to parse config from received bytes.");
             unsafe { CloseHandle(pipe_handle); }
         }
     } else {
-        debug_log(&format!("Failed to read from pipe. Success: {}, BytesRead: {}, Error: {}", success, bytes_read, unsafe { GetLastError() }));
+        debug_log(&format!("Failed to read config data from pipe. Read {}/{} bytes. Error: {}", bytes_read, config_size, unsafe { GetLastError() }));
         unsafe { CloseHandle(pipe_handle); }
     }
     debug_log("main_initialization_thread finished.");
