@@ -47,6 +47,7 @@ pub static SUSPICION_SCORE: AtomicUsize = AtomicUsize::new(0);
 static LOG_SENDER: OnceCell<Sender<Option<LogEntry>>> = OnceCell::new();
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 static THREAD_HANDLES: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+static DEBUG_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 thread_local!(static IN_HOOK: Cell<bool> = Cell::new(false));
 
@@ -126,6 +127,7 @@ fn handle_dump_module(module_name: &str) {
 
 // A simple, panic-safe file logger for early-stage debugging.
 fn debug_log(message: &str) {
+    let _guard = DEBUG_LOG_MUTEX.lock().unwrap();
     let pid = unsafe { GetCurrentProcessId() };
     let log_path = std::env::temp_dir().join(format!("monitor_lib_debug_{}.log", pid));
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
@@ -306,7 +308,7 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
     if pipe_handle != INVALID_HANDLE_VALUE {
         unsafe {
             DisconnectNamedPipe(pipe_handle);
-            CloseHandle(pipe_handle);
+            // CloseHandle(pipe_handle); // Let the OS clean it up on process detach
         }
     }
 }
@@ -475,14 +477,25 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
             if let Ok(json_string) = serde_json::to_string(&log_entry) {
                 let formatted_message = format!("{}\n", json_string);
                 let bytes = formatted_message.as_bytes();
-                unsafe {
+                let mut bytes_written = 0;
+                let success = unsafe {
                     WriteFile(
                         pipe_handle,
                         bytes.as_ptr(),
                         bytes.len() as u32,
-                        &mut 0,
+                        &mut bytes_written,
                         std::ptr::null_mut(),
-                    );
+                    )
+                };
+
+                if success == 0 {
+                    let error = unsafe { GetLastError() };
+                    debug_log(&format!(
+                        "Failed to write log to pipe. Wrote {}/{}. Error: {}",
+                        bytes_written,
+                        bytes.len(),
+                        error
+                    ));
                 }
             }
         }

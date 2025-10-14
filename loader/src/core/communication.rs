@@ -14,8 +14,13 @@ use windows_sys::Win32::{
 use shared::{Command, MonitorConfig};
 use widestring::U16CString;
 
-pub fn start_pipe_log_listener(pipe_handle: isize, logger: Sender<String>) {
+pub fn start_pipe_log_listener(
+    pipe_handle: isize,
+    logger: Sender<String>,
+    status_arc: Arc<Mutex<String>>,
+) {
     thread::spawn(move || {
+        *status_arc.lock().unwrap() = "Listener thread started.".to_string();
         let mut buffer = [0u8; 4096];
         let mut message_buffer = String::new();
         loop {
@@ -33,6 +38,8 @@ pub fn start_pipe_log_listener(pipe_handle: isize, logger: Sender<String>) {
             if success && bytes_read > 0 {
                 let chunk = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
                 message_buffer.push_str(&chunk);
+                *status_arc.lock().unwrap() =
+                    format!("Listener: Read {} bytes.", message_buffer.len());
 
                 // Process all complete messages (newline-delimited) in the buffer.
                 while let Some(newline_pos) = message_buffer.find('\n') {
@@ -43,7 +50,13 @@ pub fn start_pipe_log_listener(pipe_handle: isize, logger: Sender<String>) {
                     }
                 }
             } else {
-                // Pipe was closed or an error occurred.
+                let err = unsafe { GetLastError() };
+                *status_arc.lock().unwrap() = format!(
+                    "Listener: ReadFile failed or got 0 bytes. success={}, bytes_read={}, err={}. Breaking.",
+                    success,
+                    bytes_read,
+                    err
+                );
                 break;
             }
         }
@@ -135,7 +148,7 @@ pub fn connect_and_send_config(
         }
 
         *status_arc.lock().unwrap() = "Configuration sent. Monitoring...".to_string();
-        start_pipe_log_listener(pipe_handle, logger);
+        start_pipe_log_listener(pipe_handle, logger, status_arc.clone());
         true
     } else {
         let err = unsafe { GetLastError() };

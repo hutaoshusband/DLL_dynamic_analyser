@@ -6,6 +6,7 @@ use shared::{MonitorConfig, Preset};
 use crate::app::state::AppState;
 use crate::core::analysis;
 
+use crate::app::state::ActiveTab;
 use eframe::egui::{Ui};
 
 pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppState) {
@@ -74,6 +75,7 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                                 state.is_process_running.clone(),
                                 state.injection_status.clone(),
                             );
+                            state.active_tab = ActiveTab::Logs;
                         }
                     }
 
