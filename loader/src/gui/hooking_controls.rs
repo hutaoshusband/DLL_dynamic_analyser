@@ -1,5 +1,5 @@
 use eframe::egui::{self, Ui};
-use shared::{Command, MonitorConfig, Preset};
+use shared::Command;
 use std::sync::atomic::Ordering;
 
 use crate::app::state::AppState;
@@ -7,24 +7,6 @@ use crate::app::state::AppState;
 pub fn render_hooking_controls_tab(ui: &mut Ui, state: &mut AppState) {
     let is_running = state.is_process_running.load(Ordering::SeqCst);
 
-    ui.heading("Configuration Presets");
-    ui.horizontal(|ui| {
-        ui.label("Monitoring Preset:");
-        let selected_preset_text = format!("{:?}", state.selected_preset);
-        let combo_box = egui::ComboBox::from_id_source("preset_selector")
-            .selected_text(selected_preset_text)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.selected_preset, Preset::Stealth, "Stealth");
-                ui.selectable_value(&mut state.selected_preset, Preset::Balanced, "Balanced");
-                ui.selectable_value(&mut state.selected_preset, Preset::Aggressive, "Aggressive");
-            });
-
-        if combo_box.response.changed() {
-            state.monitor_config = MonitorConfig::from_preset(state.selected_preset);
-        }
-    });
-
-    ui.separator();
 
     ui.heading("General Settings");
     egui::Grid::new("general_settings_grid").num_columns(2).show(ui, |ui| {
