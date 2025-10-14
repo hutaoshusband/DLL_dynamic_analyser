@@ -137,7 +137,8 @@ fn debug_log(message: &str) {
 /// Reads a single, newline-terminated message from the pipe.
 /// This function will block until a complete message is received or an error occurs.
 fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<String, ()> {
-    let mut read_buf = [0u8; 1024];
+    // Increased buffer size to handle larger config messages.
+    let mut read_buf = [0u8; 8192];
     loop {
         // If a complete message is already in the buffer, return it.
         if let Some(newline_pos) = buffer.find('\n') {
@@ -217,7 +218,7 @@ fn main_initialization_thread() {
     if let Ok(config_message) = read_message_from_pipe(pipe_handle, &mut message_buffer) {
         match serde_json::from_str::<Command>(config_message.trim()) {
             Ok(Command::UpdateConfig(config)) => {
-                debug_log("Initial config command parsed successfully.");
+                debug_log(&format!("Initial config parsed. Loader path: '{}'", &config.loader_path));
                 let cloned_config = config.clone();
                 *CONFIG.features.write().unwrap() = config;
 

@@ -110,6 +110,7 @@ pub fn connect_and_send_config(
         };
         let command_to_send = format!("{}\n", command_json);
         let bytes_to_send = command_to_send.as_bytes();
+        *status_arc.lock().unwrap() = format!("Sending config ({} bytes)...", bytes_to_send.len());
 
         let mut bytes_written = 0;
         let success = unsafe {
