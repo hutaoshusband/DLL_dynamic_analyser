@@ -24,7 +24,8 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
     let monitor_config = state.monitor_config.clone();
     let process_id = state.process_id.clone();
     let process_handle = state.process_handle.clone();
-    let pipe_handle = state.pipe_handle.clone();
+    let commands_pipe_handle = state.commands_pipe_handle.clone();
+    let logs_pipe_handle = state.logs_pipe_handle.clone();
     let injection_status = state.injection_status.clone();
 
     let handle = thread::spawn(move || {
@@ -39,7 +40,8 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
                         monitor_config.clone(),
                         process_id.clone(),
                         process_handle.clone(),
-                        pipe_handle.clone(),
+                        commands_pipe_handle.clone(),
+                        logs_pipe_handle.clone(),
                         is_process_running.clone(),
                         injection_status.clone(),
                     );
@@ -60,7 +62,8 @@ pub fn start_analysis_thread(
     config: MonitorConfig,
     pid_arc: Arc<Mutex<Option<u32>>>,
     handle_arc: Arc<Mutex<Option<isize>>>,
-    pipe_arc: Arc<Mutex<Option<isize>>>,
+    commands_pipe_arc: Arc<Mutex<Option<isize>>>,
+    logs_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
 ) {
@@ -74,7 +77,8 @@ pub fn start_analysis_thread(
             config,
             pid_arc,
             handle_arc,
-            pipe_arc,
+            commands_pipe_arc,
+            logs_pipe_arc,
             running_arc,
             status_arc,
         );
@@ -89,7 +93,8 @@ fn run_analysis(
     config: MonitorConfig,
     pid_arc: Arc<Mutex<Option<u32>>>,
     handle_arc: Arc<Mutex<Option<isize>>>,
-    pipe_arc: Arc<Mutex<Option<isize>>>,
+    commands_pipe_arc: Arc<Mutex<Option<isize>>>,
+    logs_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
 ) {
@@ -121,7 +126,8 @@ fn run_analysis(
             if communication::connect_and_send_config(
                 pid,
                 &config,
-                pipe_arc.clone(),
+                commands_pipe_arc.clone(),
+                logs_pipe_arc.clone(),
                 status_arc.clone(),
                 logger.clone(),
             ) {

@@ -19,7 +19,7 @@ use crate::security::SecurityAttributes;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
 use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
-use shared::Command;
+use shared::{Command, COMMANDS_PIPE_NAME, LOGS_PIPE_NAME};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -39,7 +39,9 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::Storage::FileSystem::{
+    ReadFile, WriteFile, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
+};
 
 
 // --- Globals ---
@@ -179,12 +181,9 @@ fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<Str
 fn main_initialization_thread() {
     debug_log("main_initialization_thread started.");
 
-    let pipe_handle = unsafe {
-        let pipe_name = r"\\.\pipe\cs2_monitor_pipe";
-        let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
-
-        // Use the new security module to create attributes that allow access from non-elevated processes.
-        let mut sa = match SecurityAttributes::new() {
+    // --- Create Pipes ---
+    let mut sa = unsafe {
+        match SecurityAttributes::new() {
             Some(sa) => sa,
             None => {
                 debug_log(&format!(
@@ -193,50 +192,92 @@ fn main_initialization_thread() {
                 ));
                 return;
             }
-        };
+        }
+    };
 
+    let commands_pipe_handle = unsafe {
+        let wide_pipe_name = U16CString::from_str(COMMANDS_PIPE_NAME).unwrap();
         CreateNamedPipeW(
             wide_pipe_name.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_INBOUND, // Client reads commands from this pipe
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            1, // nMaxInstances
-            8192, // nOutBufferSize
-            8192, // nInBufferSize
-            0, // nDefaultTimeOut
+            1, 8192, 8192, 0,
             &mut sa.attributes,
         )
     };
 
-    if pipe_handle == INVALID_HANDLE_VALUE {
-        debug_log(&format!("Failed to create named pipe. Error: {}", unsafe { GetLastError() }));
+    if commands_pipe_handle == INVALID_HANDLE_VALUE {
+        debug_log(&format!(
+            "Failed to create commands pipe. Error: {}",
+            unsafe { GetLastError() }
+        ));
         return;
     }
-    debug_log("Named pipe created successfully.");
+    debug_log("Commands pipe created successfully.");
 
-    if unsafe { ConnectNamedPipe(pipe_handle, std::ptr::null_mut()) } == 0 {
-        debug_log(&format!("Failed to connect named pipe. Error: {}", unsafe { GetLastError() }));
-        unsafe { CloseHandle(pipe_handle); }
+    let logs_pipe_handle = unsafe {
+        let wide_pipe_name = U16CString::from_str(LOGS_PIPE_NAME).unwrap();
+        CreateNamedPipeW(
+            wide_pipe_name.as_ptr(),
+            PIPE_ACCESS_OUTBOUND, // Client writes logs to this pipe
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            1, 8192, 8192, 0,
+            &mut sa.attributes,
+        )
+    };
+
+    if logs_pipe_handle == INVALID_HANDLE_VALUE {
+        debug_log(&format!("Failed to create logs pipe. Error: {}", unsafe {
+            GetLastError()
+        }));
+        unsafe { CloseHandle(commands_pipe_handle) };
         return;
     }
-    debug_log("Pipe connected.");
+    debug_log("Logs pipe created successfully.");
+
+    // --- Connect Pipes ---
+    debug_log("Waiting for loader to connect to both pipes...");
+    let commands_connected = unsafe { ConnectNamedPipe(commands_pipe_handle, std::ptr::null_mut()) } != 0;
+    let logs_connected = unsafe { ConnectNamedPipe(logs_pipe_handle, std::ptr::null_mut()) } != 0;
+
+    if !commands_connected || !logs_connected {
+        debug_log(&format!(
+            "Failed to connect named pipes. Commands: {} (err {}), Logs: {} (err {}).",
+            commands_connected,
+            unsafe { GetLastError() },
+            logs_connected,
+            unsafe { GetLastError() }
+        ));
+        unsafe {
+            CloseHandle(commands_pipe_handle);
+            CloseHandle(logs_pipe_handle);
+        }
+        return;
+    }
+    debug_log("Both pipes connected.");
 
     // --- Unified Config/Command Handling ---
-    // The first message MUST be an UpdateConfig command.
     let mut message_buffer = String::new();
-    match read_message_from_pipe(pipe_handle, &mut message_buffer) {
+    match read_message_from_pipe(commands_pipe_handle, &mut message_buffer) {
         Ok(config_message) => {
             match serde_json::from_str::<Command>(config_message.trim()) {
                 Ok(Command::UpdateConfig(config)) => {
-                    debug_log(&format!("Initial config parsed. Loader path: '{}'", &config.loader_path));
+                    debug_log(&format!(
+                        "Initial config parsed. Loader path: '{}'",
+                        &config.loader_path
+                    ));
                     let cloned_config = config.clone();
                     *CONFIG.features.write().unwrap() = config;
 
                     let (sender, receiver) = bounded(1024);
                     LOG_SENDER.set(sender).expect("Log sender already set");
 
-                    // Pass the remaining buffer to the command listener.
-                    let command_thread = thread::spawn(move || command_listener_thread(pipe_handle, message_buffer));
-                    let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
+                    // Spawn threads with their dedicated pipes
+                    let command_thread = thread::spawn(move || {
+                        command_listener_thread(commands_pipe_handle, message_buffer)
+                    });
+                    let log_thread =
+                        thread::spawn(move || logging_thread_main(receiver, logs_pipe_handle));
 
                     let mut handles = THREAD_HANDLES.lock().unwrap();
                     handles.push(log_thread);
@@ -245,20 +286,35 @@ fn main_initialization_thread() {
                     debug_log("Starting feature initialization...");
                     initialize_features(cloned_config);
                     debug_log("Feature initialization returned.");
-                },
+                }
                 Ok(_) => {
                     debug_log("Received a valid command, but it was not the initial UpdateConfig.");
-                    unsafe { CloseHandle(pipe_handle); }
-                },
+                    unsafe {
+                        CloseHandle(commands_pipe_handle);
+                        CloseHandle(logs_pipe_handle);
+                    }
+                }
                 Err(e) => {
-                    debug_log(&format!("Failed to parse initial config command: {}. Raw: '{}'", e, config_message));
-                    unsafe { CloseHandle(pipe_handle); }
+                    debug_log(&format!(
+                        "Failed to parse initial config command: {}. Raw: '{}'",
+                        e, config_message
+                    ));
+                    unsafe {
+                        CloseHandle(commands_pipe_handle);
+                        CloseHandle(logs_pipe_handle);
+                    }
                 }
             }
         }
         Err(error) => {
-            debug_log(&format!("Failed to read initial config message from pipe. Error: {}", error));
-            unsafe { CloseHandle(pipe_handle); }
+            debug_log(&format!(
+                "Failed to read initial config message from pipe. Error: {}",
+                error
+            ));
+            unsafe {
+                CloseHandle(commands_pipe_handle);
+                CloseHandle(logs_pipe_handle);
+            }
         }
     }
     debug_log("main_initialization_thread finished.");
@@ -305,10 +361,11 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
         }
     }
     debug_log("Command listener thread finished.");
+    // The pipe handle is now owned by the main initialization thread's scope
+    // and will be closed when that thread finishes. We just disconnect here.
     if pipe_handle != INVALID_HANDLE_VALUE {
         unsafe {
             DisconnectNamedPipe(pipe_handle);
-            // CloseHandle(pipe_handle); // Let the OS clean it up on process detach
         }
     }
 }

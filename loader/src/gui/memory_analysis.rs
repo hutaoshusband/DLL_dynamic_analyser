@@ -44,7 +44,7 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
 
     ui.collapsing("Memory Sections", |ui| {
         if ui.button("Refresh Sections").clicked() {
-            if let Some(pipe_handle) = *state.pipe_handle.lock().unwrap() {
+            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
                 let command = Command::ListSections;
                 if let Ok(command_json) = serde_json::to_string(&command) {
                     unsafe {
@@ -80,7 +80,7 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                             section.virtual_address, section.virtual_size
                         ));
                         if ui.button("Dump").clicked() {
-                            if let Some(pipe_handle) = *state.pipe_handle.lock().unwrap() {
+                            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
                                 let command = Command::DumpSection {
                                     name: section.name.clone(),
                                 };
@@ -98,7 +98,7 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                             }
                         }
                         if ui.button("Entropy Scan").clicked() {
-                            if let Some(pipe_handle) = *state.pipe_handle.lock().unwrap() {
+                            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
                                 let command = Command::CalculateEntropy {
                                     name: section.name.clone(),
                                 };
