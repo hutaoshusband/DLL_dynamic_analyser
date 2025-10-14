@@ -557,22 +557,24 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
             }
         }
 
-        // Write to the appropriate log file
-        if let Some(_guard) = ReentrancyGuard::new() {
-            match log_entry.level {
-                LogLevel::Debug => {
-                    if let Some(file) = debug_log_file.as_mut() {
-                        if let Ok(json_string) = serde_json::to_string(&log_entry) {
-                            let _ = writeln!(file, "{}", json_string);
-                        }
+        // Write to the appropriate log file.
+        // The ReentrancyGuard is intentionally omitted here. This thread is the designated
+        // logger; it's the one place where I/O is expected. The hooks themselves are
+        // guarded, so if this thread's file operations trigger a hook (e.g., WriteFile),
+        // the hook will correctly ignore it, preventing a loop.
+        match log_entry.level {
+            LogLevel::Debug => {
+                if let Some(file) = debug_log_file.as_mut() {
+                    if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                        let _ = writeln!(file, "{}", json_string);
                     }
                 }
-                _ => {
-                    // All other levels go to the hook log
-                    if let Some(file) = hook_log_file.as_mut() {
-                        if let Ok(json_string) = serde_json::to_string(&log_entry) {
-                            let _ = writeln!(file, "{}", json_string);
-                        }
+            }
+            _ => {
+                // All other levels go to the hook log
+                if let Some(file) = hook_log_file.as_mut() {
+                    if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                        let _ = writeln!(file, "{}", json_string);
                     }
                 }
             }
@@ -607,7 +609,8 @@ fn initialize_features(config: MonitorConfig) {
         let scanner_handle = thread::spawn(move || {
             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
                 if iat_enabled {
-                    unsafe { iat_monitor::scan_iat_modifications(); }
+                    // This was disabled due to causing stability issues and log spam.
+                    // unsafe { iat_monitor::scan_iat_modifications(); }
                 }
                 if manual_map_enabled {
                     unsafe {
