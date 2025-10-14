@@ -6,16 +6,14 @@ use shared::{MonitorConfig, Preset};
 use crate::app::state::AppState;
 use crate::core::analysis;
 
-pub fn render_launcher_window(ctx: &egui::Context, state: &mut AppState) {
+use eframe::egui::{Ui};
+
+pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppState) {
     let mut auto_inject_clicked = false;
     let mut auto_inject_enabled = state.auto_inject_enabled.load(Ordering::SeqCst);
 
-    egui::Window::new("Launcher & Controls")
-        .open(&mut state.windows.launcher_window_open)
-        .vscroll(true)
-        .show(ctx, |ui| {
-            ui.heading("Analysis Launcher");
-            ui.separator();
+    ui.heading("Analysis Launcher");
+    ui.separator();
 
             // --- Target Selection ---
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -96,7 +94,6 @@ pub fn render_launcher_window(ctx: &egui::Context, state: &mut AppState) {
              if state.dll_path.is_none() {
                 ui.colored_label(egui::Color32::RED, "client.dll not found in the application directory.");
             }
-        });
 
     if auto_inject_clicked {
         state.auto_inject_enabled.store(auto_inject_enabled, Ordering::SeqCst);

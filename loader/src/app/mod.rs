@@ -4,7 +4,7 @@ use std::sync::{atomic::Ordering, mpsc, Arc, Mutex};
 
 use eframe::egui;
 
-use self::state::AppState;
+use self::state::{ActiveTab, AppState};
 
 pub struct App {
     state: Arc<Mutex<AppState>>,
@@ -38,30 +38,24 @@ impl eframe::App for App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut state.windows.log_window_open, "Logs");
-                    ui.checkbox(
-                        &mut state.windows.memory_analysis_window_open,
-                        "Memory Analysis",
-                    );
-                    ui.checkbox(
-                        &mut state.windows.hooking_control_window_open,
-                        "Hooking Controls",
-                    );
-                    ui.checkbox(
-                        &mut state.windows.entropy_viewer_window_open,
-                        "Entropy Viewer",
-                    );
-                    ui.checkbox(
-                        &mut state.windows.network_activity_window_open,
-                        "Network Activity",
-                    );
-                });
             });
         });
 
-        // Render the UI
-        crate::gui::render(ctx, &mut state);
+        // Render the tab selection UI and the main content area
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut state.active_tab, ActiveTab::Launcher, "Launcher");
+                ui.selectable_value(&mut state.active_tab, ActiveTab::Logs, "Logs");
+                ui.selectable_value(&mut state.active_tab, ActiveTab::MemoryAnalysis, "Memory Analysis");
+                ui.selectable_value(&mut state.active_tab, ActiveTab::Hooking, "Hooking Controls");
+                ui.selectable_value(&mut state.active_tab, ActiveTab::Network, "Network Activity");
+            });
+            ui.separator();
+
+            // Render the content for the active tab
+            crate::gui::render_active_tab(ctx, ui, &mut state);
+        });
+
 
         // Request a repaint if the process is running to keep the UI updated
         if state.is_process_running.load(Ordering::SeqCst) {

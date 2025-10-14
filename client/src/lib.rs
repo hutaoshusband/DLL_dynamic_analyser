@@ -39,8 +39,11 @@ use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
 use windows_sys::Win32::Security::{
-    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_ATTRIBUTES,
-    SECURITY_DESCRIPTOR,
+    SECURITY_ATTRIBUTES,
+    PSECURITY_DESCRIPTOR,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW
 };
 use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
 
@@ -145,19 +148,37 @@ fn main_initialization_thread() {
         let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
         let wide_pipe_name = U16CString::from_str(&pipe_name).unwrap();
 
-        let mut sa: SECURITY_ATTRIBUTES = std::mem::zeroed();
-        let mut sd: SECURITY_DESCRIPTOR = std::mem::zeroed();
-        InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1);
-        SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, std::ptr::null_mut(), 0);
-        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
-        sa.lpSecurityDescriptor = &mut sd as *mut _ as *mut _;
-        sa.bInheritHandle = 0;
+        // Create a security descriptor that grants access only to the current user (System and Admins).
+        // SDDL for "System" and "Built-in Administrators".
+        let sddl = U16CString::from_str("D:(A;OICI;GRGW;;;SY)(A;OICI;GRGW;;;BA)").unwrap();
+        let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let conversion_success = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1, // SDDL_REVISION_1
+            &mut security_descriptor,
+            std::ptr::null_mut(),
+        ) != 0;
+
+        if !conversion_success {
+            debug_log(&format!("Failed to create security descriptor. Error: {}", GetLastError()));
+            return;
+        }
+
+        let mut sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: security_descriptor,
+            bInheritHandle: 0,
+        };
 
         CreateNamedPipeW(
             wide_pipe_name.as_ptr(),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            1, 4096, 4096, 0, &sa,
+            1, // Number of instances
+            4096, // Out buffer size
+            4096, // In buffer size
+            0,    // Default timeout
+            &mut sa,
         )
     };
 

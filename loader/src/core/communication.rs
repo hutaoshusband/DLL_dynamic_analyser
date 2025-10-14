@@ -1,14 +1,14 @@
 use std::{
     sync::{mpsc::Sender, Arc, Mutex},
     thread,
+    time::Duration,
 };
 use windows_sys::Win32::{
-    Foundation::{GetLastError, INVALID_HANDLE_VALUE},
+    Foundation::{GetLastError, INVALID_HANDLE_VALUE, ERROR_PIPE_BUSY},
     Storage::FileSystem::{
-        CreateFileW, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, FILE_GENERIC_READ,
+        CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, FILE_GENERIC_READ,
         FILE_GENERIC_WRITE,
     },
-    System::Pipes::WaitNamedPipeW,
 };
 
 use shared::MonitorConfig;
@@ -49,27 +49,38 @@ pub fn connect_and_send_config(
 ) -> bool {
     let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
     let wide_pipe_name = U16CString::from_str(&pipe_name).unwrap();
-    const TIMEOUT_MS: u32 = 5000; // 5 seconds
+    const MAX_RETRIES: u32 = 10; // Total wait time up to 10 * 500ms = 5 seconds
+    const RETRY_DELAY_MS: u64 = 500;
 
-    // Wait for the named pipe to become available
-    if unsafe { WaitNamedPipeW(wide_pipe_name.as_ptr(), TIMEOUT_MS) } == 0 {
+    let mut pipe_handle = INVALID_HANDLE_VALUE;
+
+    for i in 0..MAX_RETRIES {
+        pipe_handle = unsafe {
+            CreateFileW(
+                wide_pipe_name.as_ptr(),
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0, // Not using FILE_FLAG_OVERLAPPED for the initial connection
+                0,
+            )
+        };
+
+        if pipe_handle != INVALID_HANDLE_VALUE {
+            break; // Success
+        }
+
         let err = unsafe { GetLastError() };
-        *status_arc.lock().unwrap() =
-            format!("Pipe not available within {}ms. Error: {}", TIMEOUT_MS, err);
-        return false;
-    }
+        if err != ERROR_PIPE_BUSY {
+            *status_arc.lock().unwrap() = format!("Failed to connect to pipe. Error: {}", err);
+            return false;
+        }
 
-    let pipe_handle = unsafe {
-        CreateFileW(
-            wide_pipe_name.as_ptr(),
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-            0,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_OVERLAPPED,
-            0,
-        )
-    };
+        // Pipe is busy, wait and retry
+        *status_arc.lock().unwrap() = format!("Pipe is busy, retrying... ({}/{})", i + 1, MAX_RETRIES);
+        thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+    }
 
     if pipe_handle != INVALID_HANDLE_VALUE {
         let mut pipe_handle_guard = pipe_handle_arc.lock().unwrap();
