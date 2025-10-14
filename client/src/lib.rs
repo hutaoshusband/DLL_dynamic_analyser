@@ -17,7 +17,7 @@ use crate::logging::create_log_entry;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
 use once_cell::sync::OnceCell;
-use shared::{Command, MonitorConfig};
+use shared::Command;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -140,6 +140,38 @@ fn debug_log(message: &str) {
     }
 }
 
+/// Reads a single, newline-terminated message from the pipe.
+/// This function will block until a complete message is received or an error occurs.
+fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<String, ()> {
+    let mut read_buf = [0u8; 1024];
+    loop {
+        // If a complete message is already in the buffer, return it.
+        if let Some(newline_pos) = buffer.find('\n') {
+            let message = buffer.drain(..=newline_pos).collect();
+            return Ok(message);
+        }
+
+        // Otherwise, read more data from the pipe.
+        let mut bytes_read = 0;
+        let success = unsafe {
+            ReadFile(
+                pipe_handle,
+                read_buf.as_mut_ptr() as _,
+                read_buf.len() as u32,
+                &mut bytes_read,
+                std::ptr::null_mut(),
+            )
+        } != 0;
+
+        if success && bytes_read > 0 {
+            buffer.push_str(&String::from_utf8_lossy(&read_buf[..bytes_read as usize]));
+        } else {
+            // Error or pipe closed
+            return Err(());
+        }
+    }
+}
+
 /// The main initialization thread. Creates the pipe server, waits for config, and starts features.
 fn main_initialization_thread() {
     debug_log("main_initialization_thread started.");
@@ -148,18 +180,14 @@ fn main_initialization_thread() {
         let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
         let wide_pipe_name = U16CString::from_str(&pipe_name).unwrap();
 
-        // Create a security descriptor that grants access only to the current user (System and Admins).
-        // SDDL for "System" and "Built-in Administrators".
         let sddl = U16CString::from_str("D:(A;OICI;GRGW;;;SY)(A;OICI;GRGW;;;BA)").unwrap();
         let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        let conversion_success = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
-            1, // SDDL_REVISION_1
+            1,
             &mut security_descriptor,
             std::ptr::null_mut(),
-        ) != 0;
-
-        if !conversion_success {
+        ) == 0 {
             debug_log(&format!("Failed to create security descriptor. Error: {}", GetLastError()));
             return;
         }
@@ -174,11 +202,7 @@ fn main_initialization_thread() {
             wide_pipe_name.as_ptr(),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            1, // Number of instances
-            4096, // Out buffer size
-            4096, // In buffer size
-            0,    // Default timeout
-            &mut sa,
+            1, 4096, 4096, 0, &mut sa,
         )
     };
 
@@ -188,93 +212,70 @@ fn main_initialization_thread() {
     }
     debug_log("Named pipe created successfully.");
 
-    let connected = unsafe { ConnectNamedPipe(pipe_handle, std::ptr::null_mut()) != 0 };
-    if !connected {
+    if unsafe { ConnectNamedPipe(pipe_handle, std::ptr::null_mut()) } == 0 {
         debug_log(&format!("Failed to connect named pipe. Error: {}", unsafe { GetLastError() }));
         unsafe { CloseHandle(pipe_handle); }
         return;
     }
     debug_log("Pipe connected.");
 
-    // --- Read Config ---
-    // First, read the 4-byte size prefix.
-    let mut size_buffer = [0u8; 4];
-    let mut bytes_read = 0;
-    let mut success = unsafe {
-        ReadFile(pipe_handle, size_buffer.as_mut_ptr() as _, 4, &mut bytes_read, std::ptr::null_mut())
-    } != 0;
+    // --- Unified Config/Command Handling ---
+    // The first message MUST be an UpdateConfig command.
+    let mut message_buffer = String::new();
+    if let Ok(config_message) = read_message_from_pipe(pipe_handle, &mut message_buffer) {
+        match serde_json::from_str::<Command>(config_message.trim()) {
+            Ok(Command::UpdateConfig(config)) => {
+                debug_log("Initial config command parsed successfully.");
+                *CONFIG.features.write().unwrap() = config;
 
-    if !success || bytes_read != 4 {
-        debug_log(&format!("Failed to read config size from pipe. Read {} bytes. Error: {}", bytes_read, unsafe { GetLastError() }));
-        unsafe { CloseHandle(pipe_handle); }
-        return;
-    }
+                let (sender, receiver) = bounded(1024);
+                LOG_SENDER.set(sender).expect("Log sender already set");
 
-    let config_size = u32::from_ne_bytes(size_buffer);
-    debug_log(&format!("Expecting config of size: {}", config_size));
+                // Pass the remaining buffer to the command listener.
+                let command_thread = thread::spawn(move || command_listener_thread(pipe_handle, message_buffer));
+                let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
 
-    // Now, read the actual config data.
-    let mut config_buffer = vec![0u8; config_size as usize];
-    bytes_read = 0;
-    success = unsafe {
-        ReadFile(pipe_handle, config_buffer.as_mut_ptr() as _, config_size, &mut bytes_read, std::ptr::null_mut())
-    } != 0;
+                let mut handles = THREAD_HANDLES.lock().unwrap();
+                handles.push(log_thread);
+                handles.push(command_thread);
 
-    if success && bytes_read == config_size {
-        if let Ok(config) = serde_json::from_slice::<MonitorConfig>(&config_buffer) {
-            debug_log("Config parsed successfully.");
-            *CONFIG.features.write().unwrap() = config;
-
-            let (sender, receiver) = bounded(1024);
-            LOG_SENDER.set(sender).expect("Log sender already set");
-
-            let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
-            let command_thread = thread::spawn(move || command_listener_thread(pipe_handle));
-
-            let mut handles = THREAD_HANDLES.lock().unwrap();
-            handles.push(log_thread);
-            handles.push(command_thread);
-
-            debug_log("Starting feature initialization...");
-            initialize_features();
-            debug_log("Feature initialization returned.");
-        } else {
-            debug_log("Failed to parse config from received bytes.");
-            unsafe { CloseHandle(pipe_handle); }
+                debug_log("Starting feature initialization...");
+                initialize_features();
+                debug_log("Feature initialization returned.");
+            },
+            Ok(_) => {
+                debug_log("Received a valid command, but it was not the initial UpdateConfig.");
+                unsafe { CloseHandle(pipe_handle); }
+            },
+            Err(e) => {
+                debug_log(&format!("Failed to parse initial config command: {}. Raw: '{}'", e, config_message));
+                unsafe { CloseHandle(pipe_handle); }
+            }
         }
     } else {
-        debug_log(&format!("Failed to read config data from pipe. Read {}/{} bytes. Error: {}", bytes_read, config_size, unsafe { GetLastError() }));
+        debug_log("Failed to read initial config message from pipe.");
         unsafe { CloseHandle(pipe_handle); }
     }
     debug_log("main_initialization_thread finished.");
 }
 
-fn command_listener_thread(pipe_handle: isize) {
+
+fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
     debug_log("Command listener thread started.");
-    let mut buffer = [0u8; 4096];
     loop {
         if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
             break;
         }
 
-        let mut bytes_read = 0;
-        let success = unsafe {
-            ReadFile(
-                pipe_handle,
-                buffer.as_mut_ptr() as *mut _,
-                buffer.len() as u32,
-                &mut bytes_read,
-                std::ptr::null_mut(),
-            )
-        } != 0;
+        match read_message_from_pipe(pipe_handle, &mut message_buffer) {
+            Ok(message) => {
+                let command_str = message.trim();
+                if command_str.is_empty() {
+                    continue;
+                }
+                debug_log(&format!("Received command string: {}", command_str));
 
-        if success && bytes_read > 0 {
-            let command_str = String::from_utf8_lossy(&buffer[..bytes_read as usize]);
-            debug_log(&format!("Received command string: {}", command_str));
-
-            // Handle multiple commands in a single read
-            for part in command_str.split('\n').filter(|s| !s.is_empty()) {
-                match serde_json::from_str::<Command>(part) {
+                match serde_json::from_str::<Command>(command_str) {
                     Ok(Command::ListSections) => handle_list_sections(),
                     Ok(Command::DumpSection { name }) => handle_dump_section(&name),
                     Ok(Command::CalculateEntropy { name }) => handle_calculate_entropy(&name),
@@ -282,22 +283,20 @@ fn command_listener_thread(pipe_handle: isize) {
                         debug_log(&format!("Updating config: {:?}", new_config));
                         let mut config_guard = CONFIG.features.write().unwrap();
                         *config_guard = new_config;
-                        // Potentially re-initialize features or hooks based on the new config
-                        // For now, we assume hooks check the config dynamically.
                     }
                     Ok(Command::DumpModule { module_name }) => {
                         handle_dump_module(&module_name);
                     }
-                    Err(e) => debug_log(&format!("Failed to parse command: '{}', error: {}", part, e)),
+                    Err(e) => debug_log(&format!("Failed to parse command: '{}', error: {}", command_str, e)),
                 }
             }
-        } else {
-            let error = unsafe { GetLastError() };
-            // ERROR_BROKEN_PIPE is expected when the loader disconnects
-            if error != windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
-                debug_log(&format!("ReadFile failed in command listener with error: {}. Shutting down.", error));
+            Err(_) => {
+                let error = unsafe { GetLastError() };
+                if error != windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
+                     debug_log(&format!("Pipe read failed in command listener with error: {}. Shutting down.", error));
+                }
+                break;
             }
-            break;
         }
     }
     debug_log("Command listener thread finished.");
