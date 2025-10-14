@@ -31,7 +31,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use widestring::U16CString;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE,
+    CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE, ERROR_MORE_DATA,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
@@ -134,19 +134,15 @@ fn debug_log(message: &str) {
     }
 }
 
-/// Reads a single, newline-terminated message from the pipe.
-/// This function will block until a complete message is received or an error occurs.
-fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<String, ()> {
-    // Increased buffer size to handle larger config messages.
-    let mut read_buf = [0u8; 8192];
+// Reads a single, newline-terminated message from the pipe, handling ERROR_MORE_DATA.
+fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<String, u32> {
+    let mut read_buf = [0u8; 1024]; // A smaller, reasonable buffer for each read call.
     loop {
-        // If a complete message is already in the buffer, return it.
         if let Some(newline_pos) = buffer.find('\n') {
             let message = buffer.drain(..=newline_pos).collect();
             return Ok(message);
         }
 
-        // Otherwise, read more data from the pipe.
         let mut bytes_read = 0;
         let success = unsafe {
             ReadFile(
@@ -156,13 +152,23 @@ fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<Str
                 &mut bytes_read,
                 std::ptr::null_mut(),
             )
-        } != 0;
+        };
 
-        if success && bytes_read > 0 {
-            buffer.push_str(&String::from_utf8_lossy(&read_buf[..bytes_read as usize]));
+        let error = unsafe { GetLastError() };
+
+        if success != 0 || error == ERROR_MORE_DATA {
+            if bytes_read > 0 {
+                buffer.push_str(&String::from_utf8_lossy(&read_buf[..bytes_read as usize]));
+            }
+            if error != ERROR_MORE_DATA {
+                 // If success was true but there's no more data, we might need to wait,
+                 // but for message-based pipes, we should get the whole message or an error.
+                 // If we have a newline, the loop start will catch it. If not, continue reading.
+                 continue;
+            }
         } else {
-            // Error or pipe closed
-            return Err(());
+            // A real error occurred
+            return Err(error);
         }
     }
 }
@@ -192,8 +198,8 @@ fn main_initialization_thread() {
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             1, // nMaxInstances
-            4096, // nOutBufferSize
-            4096, // nInBufferSize
+            8192, // nOutBufferSize
+            8192, // nInBufferSize
             0, // nDefaultTimeOut
             &mut sa.attributes,
         )
@@ -215,41 +221,43 @@ fn main_initialization_thread() {
     // --- Unified Config/Command Handling ---
     // The first message MUST be an UpdateConfig command.
     let mut message_buffer = String::new();
-    if let Ok(config_message) = read_message_from_pipe(pipe_handle, &mut message_buffer) {
-        match serde_json::from_str::<Command>(config_message.trim()) {
-            Ok(Command::UpdateConfig(config)) => {
-                debug_log(&format!("Initial config parsed. Loader path: '{}'", &config.loader_path));
-                let cloned_config = config.clone();
-                *CONFIG.features.write().unwrap() = config;
+    match read_message_from_pipe(pipe_handle, &mut message_buffer) {
+        Ok(config_message) => {
+            match serde_json::from_str::<Command>(config_message.trim()) {
+                Ok(Command::UpdateConfig(config)) => {
+                    debug_log(&format!("Initial config parsed. Loader path: '{}'", &config.loader_path));
+                    let cloned_config = config.clone();
+                    *CONFIG.features.write().unwrap() = config;
 
-                let (sender, receiver) = bounded(1024);
-                LOG_SENDER.set(sender).expect("Log sender already set");
+                    let (sender, receiver) = bounded(1024);
+                    LOG_SENDER.set(sender).expect("Log sender already set");
 
-                // Pass the remaining buffer to the command listener.
-                let command_thread = thread::spawn(move || command_listener_thread(pipe_handle, message_buffer));
-                let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
+                    // Pass the remaining buffer to the command listener.
+                    let command_thread = thread::spawn(move || command_listener_thread(pipe_handle, message_buffer));
+                    let log_thread = thread::spawn(move || logging_thread_main(receiver, pipe_handle));
 
-                let mut handles = THREAD_HANDLES.lock().unwrap();
-                handles.push(log_thread);
-                handles.push(command_thread);
+                    let mut handles = THREAD_HANDLES.lock().unwrap();
+                    handles.push(log_thread);
+                    handles.push(command_thread);
 
-                debug_log("Starting feature initialization...");
-                initialize_features(cloned_config);
-                debug_log("Feature initialization returned.");
-            },
-            Ok(_) => {
-                debug_log("Received a valid command, but it was not the initial UpdateConfig.");
-                unsafe { CloseHandle(pipe_handle); }
-            },
-            Err(e) => {
-                debug_log(&format!("Failed to parse initial config command: {}. Raw: '{}'", e, config_message));
-                unsafe { CloseHandle(pipe_handle); }
+                    debug_log("Starting feature initialization...");
+                    initialize_features(cloned_config);
+                    debug_log("Feature initialization returned.");
+                },
+                Ok(_) => {
+                    debug_log("Received a valid command, but it was not the initial UpdateConfig.");
+                    unsafe { CloseHandle(pipe_handle); }
+                },
+                Err(e) => {
+                    debug_log(&format!("Failed to parse initial config command: {}. Raw: '{}'", e, config_message));
+                    unsafe { CloseHandle(pipe_handle); }
+                }
             }
         }
-    } else {
-        let error = unsafe { GetLastError() };
-        debug_log(&format!("Failed to read initial config message from pipe. Error: {}", error));
-        unsafe { CloseHandle(pipe_handle); }
+        Err(error) => {
+            debug_log(&format!("Failed to read initial config message from pipe. Error: {}", error));
+            unsafe { CloseHandle(pipe_handle); }
+        }
     }
     debug_log("main_initialization_thread finished.");
 }
