@@ -9,14 +9,16 @@ mod hooks;
 mod iat_monitor;
 mod logging;
 mod scanner;
+mod security;
 mod string_dumper;
 mod vmp_dumper;
 use crate::config::CONFIG;
 use crate::hooks::{cpprest_hook, winapi_hooks};
 use crate::logging::create_log_entry;
+use crate::security::SecurityAttributes;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
 use once_cell::sync::OnceCell;
+use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
 use shared::Command;
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -38,14 +40,6 @@ use windows_sys::Win32::System::Pipes::{
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
-use windows_sys::Win32::Security::{
-    SECURITY_ATTRIBUTES,
-    PSECURITY_DESCRIPTOR,
-};
-use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW
-};
-use windows_sys::Win32::UI::Shell::{CSIDL_LOCAL_APPDATA, SHGetFolderPathW};
 
 
 // --- Globals ---
@@ -175,34 +169,32 @@ fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<Str
 /// The main initialization thread. Creates the pipe server, waits for config, and starts features.
 fn main_initialization_thread() {
     debug_log("main_initialization_thread started.");
+
     let pipe_handle = unsafe {
-        let pid = GetCurrentProcessId();
-        let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
-        let wide_pipe_name = U16CString::from_str(&pipe_name).unwrap();
+        let pipe_name = r"\\.\pipe\cs2_monitor_pipe";
+        let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
 
-        let sddl = U16CString::from_str("D:(A;OICI;GRGW;;;SY)(A;OICI;GRGW;;;BA)").unwrap();
-        let mut security_descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut security_descriptor,
-            std::ptr::null_mut(),
-        ) == 0 {
-            debug_log(&format!("Failed to create security descriptor. Error: {}", GetLastError()));
-            return;
-        }
-
-        let mut sa = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: security_descriptor,
-            bInheritHandle: 0,
+        // Use the new security module to create attributes that allow access from non-elevated processes.
+        let mut sa = match SecurityAttributes::new() {
+            Some(sa) => sa,
+            None => {
+                debug_log(&format!(
+                    "Failed to create security attributes. Error: {}",
+                    GetLastError()
+                ));
+                return;
+            }
         };
 
         CreateNamedPipeW(
             wide_pipe_name.as_ptr(),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            1, 4096, 4096, 0, &mut sa,
+            1, // nMaxInstances
+            4096, // nOutBufferSize
+            4096, // nInBufferSize
+            0, // nDefaultTimeOut
+            &mut sa.attributes,
         )
     };
 
@@ -226,6 +218,7 @@ fn main_initialization_thread() {
         match serde_json::from_str::<Command>(config_message.trim()) {
             Ok(Command::UpdateConfig(config)) => {
                 debug_log("Initial config command parsed successfully.");
+                let cloned_config = config.clone();
                 *CONFIG.features.write().unwrap() = config;
 
                 let (sender, receiver) = bounded(1024);
@@ -240,7 +233,7 @@ fn main_initialization_thread() {
                 handles.push(command_thread);
 
                 debug_log("Starting feature initialization...");
-                initialize_features();
+                initialize_features(cloned_config);
                 debug_log("Feature initialization returned.");
             },
             Ok(_) => {
@@ -253,7 +246,8 @@ fn main_initialization_thread() {
             }
         }
     } else {
-        debug_log("Failed to read initial config message from pipe.");
+        let error = unsafe { GetLastError() };
+        debug_log(&format!("Failed to read initial config message from pipe. Error: {}", error));
         unsafe { CloseHandle(pipe_handle); }
     }
     debug_log("main_initialization_thread finished.");
@@ -436,75 +430,80 @@ fn handle_list_sections() {
     });
 }
 
-fn get_log_file_path() -> Option<PathBuf> {
-    const MAX_PATH: usize = 260;
-    let mut path_buf = [0u16; MAX_PATH];
-    let result = unsafe {
-        SHGetFolderPathW(
-            0,
-            CSIDL_LOCAL_APPDATA as i32,
-            0,
-            0,
-            path_buf.as_mut_ptr(),
-        )
-    };
-
-    if result == 0 { // S_OK
-        let path_len = path_buf.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
-        let log_dir = PathBuf::from(String::from_utf16_lossy(&path_buf[..path_len]));
-
-        let mut dir = log_dir.join("cs2_creator");
-        dir.push("logs");
-        if fs::create_dir_all(&dir).is_err() {
-            return None;
-        }
-
-        let pid = unsafe { GetCurrentProcessId() };
-        Some(dir.join(format!("log_{}.txt", pid)))
-    } else {
-        None
-    }
-}
-
-
 fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {
-    let mut log_file: Option<File> = {
-        let _guard = ReentrancyGuard::new();
-        if let Some(log_path) = get_log_file_path() {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)
-                .ok()
-        } else {
-            None
-        }
-    };
+    // Use the loader_path from the global config to create log files.
+    let config = CONFIG.features.read().unwrap();
+    let base_path = PathBuf::from(&config.loader_path);
+
+    let mut hook_log_file: Option<File> = None;
+    let mut debug_log_file: Option<File> = None;
+
+    let hook_log_path = base_path.join("logs").join("hook_logs");
+    if fs::create_dir_all(&hook_log_path).is_ok() {
+        let log_file_path = hook_log_path.join("hook_log.json");
+        hook_log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file_path)
+            .ok();
+    }
+
+    let debug_log_path = base_path.join("logs").join("debug");
+    if fs::create_dir_all(&debug_log_path).is_ok() {
+        let log_file_path = debug_log_path.join("debug_log.txt");
+        debug_log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file_path)
+            .ok();
+    }
+    // Drop the read lock so other threads can access the config.
+    drop(config);
 
     while let Ok(Some(log_entry)) = receiver.recv() {
-        if let Ok(json_string) = serde_json::to_string(&log_entry) {
-            let formatted_message = format!("{}\n", json_string);
-            let bytes = formatted_message.as_bytes();
-
-            if let Some(_guard) = ReentrancyGuard::new() {
-                if let Some(file) = log_file.as_mut() {
-                    let _ = file.write_all(bytes);
-                    let _ = file.flush();
+        // Always send to the pipe if it's valid
+        if pipe_handle != INVALID_HANDLE_VALUE {
+            if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                let formatted_message = format!("{}\n", json_string);
+                let bytes = formatted_message.as_bytes();
+                unsafe {
+                    WriteFile(
+                        pipe_handle,
+                        bytes.as_ptr(),
+                        bytes.len() as u32,
+                        &mut 0,
+                        std::ptr::null_mut(),
+                    );
                 }
-                if pipe_handle != INVALID_HANDLE_VALUE {
-                    unsafe {
-                        WriteFile(pipe_handle, bytes.as_ptr(), bytes.len() as u32, &mut 0, std::ptr::null_mut());
+            }
+        }
+
+        // Write to the appropriate log file
+        if let Some(_guard) = ReentrancyGuard::new() {
+            match log_entry.level {
+                LogLevel::Debug => {
+                    if let Some(file) = debug_log_file.as_mut() {
+                        if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                            let _ = writeln!(file, "{}", json_string);
+                        }
+                    }
+                }
+                _ => {
+                    // All other levels go to the hook log
+                    if let Some(file) = hook_log_file.as_mut() {
+                        if let Ok(json_string) = serde_json::to_string(&log_entry) {
+                            let _ = writeln!(file, "{}", json_string);
+                        }
                     }
                 }
             }
         }
     }
-
 }
 
-fn initialize_features() {
-    let config = CONFIG.features.read().unwrap();
-    log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", *config) });
+use shared::MonitorConfig;
+fn initialize_features(config: MonitorConfig) {
+    log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", config) });
 
     let addr = &CONFIG.termination_allowed as *const _ as usize;
     log_event(LogLevel::Debug, LogEvent::Initialization { status: format!("TERMINATION_FLAG_ADDR:{}", addr) });
@@ -524,22 +523,20 @@ fn initialize_features() {
         scanner_threads.push(thread::spawn(string_dumper::start_string_dumper));
     }
     if config.iat_scan_enabled || config.manual_map_scan_enabled {
-        let iat = config.iat_scan_enabled;
-        let manual_map = config.manual_map_scan_enabled;
+        let iat_enabled = config.iat_scan_enabled;
+        let manual_map_enabled = config.manual_map_scan_enabled;
         let scanner_handle = thread::spawn(move || {
             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
-                let current_config = CONFIG.features.read().unwrap();
-                unsafe {
-                    if current_config.iat_scan_enabled {
-                        iat_monitor::scan_iat_modifications();
-                    }
-                    if current_config.manual_map_scan_enabled {
+                if iat_enabled {
+                    unsafe { iat_monitor::scan_iat_modifications(); }
+                }
+                if manual_map_enabled {
+                    unsafe {
                         scanner::scan_for_manual_mapping();
                         code_monitor::monitor_code_modifications();
                         hardware_bp::check_debug_registers();
                     }
                 }
-                drop(current_config); // Release the lock
                 thread::sleep(Duration::from_secs(5));
             }
         });

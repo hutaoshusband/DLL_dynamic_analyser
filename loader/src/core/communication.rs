@@ -51,14 +51,15 @@ pub fn start_pipe_log_listener(pipe_handle: isize, logger: Sender<String>) {
 }
 
 pub fn connect_and_send_config(
-    pid: u32,
+    _pid: u32,
     config: &MonitorConfig,
     pipe_handle_arc: Arc<Mutex<Option<isize>>>,
     status_arc: Arc<Mutex<String>>,
     logger: Sender<String>,
 ) -> bool {
-    let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
-    let wide_pipe_name = U16CString::from_str(&pipe_name).unwrap();
+    // Connect to the fixed pipe name.
+    let pipe_name = r"\\.\pipe\cs2_monitor_pipe";
+    let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
     const MAX_RETRIES: u32 = 10; // Total wait time up to 10 * 500ms = 5 seconds
     const RETRY_DELAY_MS: u64 = 500;
 
@@ -99,7 +100,7 @@ pub fn connect_and_send_config(
 
         // --- Standardized Communication ---
         // Wrap the config in an `UpdateConfig` command and send it as a newline-terminated JSON string.
-        let command = Command::UpdateConfig(*config);
+        let command = Command::UpdateConfig(config.clone());
         let command_json = match serde_json::to_string(&command) {
             Ok(json) => json,
             Err(e) => {

@@ -40,7 +40,7 @@ macro_rules! define_monitor_config {
             $($h_field:ident),*
         }
     ) => {
-        #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+        #[derive(Serialize, Deserialize, Debug, Clone)]
         pub struct MonitorConfig {
             // General fields
             $(pub $g_field: $g_type),*,
@@ -113,6 +113,7 @@ macro_rules! define_monitor_config {
 // This is now the single source of truth for all configuration fields.
 define_monitor_config! {
     general {
+        loader_path: String = "".to_string(),
         api_hooks_enabled: bool = true,
         iat_scan_enabled: bool = true,
         string_dump_enabled: bool = false,

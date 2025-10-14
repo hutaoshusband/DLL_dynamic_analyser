@@ -148,7 +148,7 @@ pub fn render_hooking_controls_tab(ui: &mut Ui, state: &mut AppState) {
 
     if ui.add_enabled(is_running, egui::Button::new("Apply Configuration")).clicked() {
          if let Some(pipe_handle) = *state.pipe_handle.lock().unwrap() {
-            let command = Command::UpdateConfig(state.monitor_config);
+            let command = Command::UpdateConfig(state.monitor_config.clone());
             if let Ok(command_json) = serde_json::to_string(&command) {
                 let command_to_send = format!("{}\n", command_json);
                 unsafe {

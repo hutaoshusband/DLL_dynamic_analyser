@@ -67,7 +67,7 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                                 name_to_use,
                                 pid_to_use,
                                 &dll_path,
-                                state.monitor_config,
+                                state.monitor_config.clone(),
                                 state.process_id.clone(),
                                 state.process_handle.clone(),
                                 state.pipe_handle.clone(),

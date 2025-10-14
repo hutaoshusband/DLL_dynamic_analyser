@@ -21,7 +21,7 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
     let target_process_name = state.target_process_name.clone();
     let dll_path = state.dll_path.clone();
     let log_sender = state.log_sender.clone();
-    let monitor_config = state.monitor_config;
+    let monitor_config = state.monitor_config.clone();
     let process_id = state.process_id.clone();
     let process_handle = state.process_handle.clone();
     let pipe_handle = state.pipe_handle.clone();
@@ -36,7 +36,7 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
                         Some(target_process_name.as_str()),
                         None,
                         &dll_path,
-                        monitor_config,
+                        monitor_config.clone(),
                         process_id.clone(),
                         process_handle.clone(),
                         pipe_handle.clone(),
