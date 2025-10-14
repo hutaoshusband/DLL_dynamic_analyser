@@ -70,7 +70,8 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                                 state.monitor_config,
                                 state.process_id.clone(),
                                 state.process_handle.clone(),
-                                state.pipe_handle.clone(),
+                                state.cmd_pipe_handle.clone(),
+                                state.log_pipe_handle.clone(),
                                 state.is_process_running.clone(),
                                 state.injection_status.clone(),
                             );

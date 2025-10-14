@@ -751,6 +751,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "client"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crossbeam-channel",
+ "hex",
+ "iced-x86",
+ "lazy_static",
+ "log",
+ "once_cell",
+ "patternscan",
+ "pelite",
+ "retour",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shannon-entropy",
+ "shared",
+ "simple_logger",
+ "widestring 0.5.1",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -946,21 +970,6 @@ checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
 dependencies = [
  "generic-array",
  "typenum",
-]
-
-[[package]]
-name = "cs2_creator"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "eframe",
- "egui",
- "embed-resource",
- "rfd",
- "serde",
- "serde_json",
- "widestring 0.5.1",
- "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1170,6 +1179,15 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "winit",
+]
+
+[[package]]
+name = "egui_plot"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7854b86dc1c2d352c5270db3d600011daa913d6b554141a03939761323288a1"
+dependencies = [
+ "egui",
 ]
 
 [[package]]
@@ -2043,6 +2061,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5e54036fe321fd421e10d732f155734c4e4afd610dd556d9a82833ab3ee0bed"
 
 [[package]]
+name = "loader"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "eframe",
+ "egui",
+ "egui_plot",
+ "embed-resource",
+ "rfd",
+ "serde",
+ "serde_json",
+ "shared",
+ "widestring 0.5.1",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2141,28 +2176,6 @@ checksum = "0681853891801e4763dc252e843672faf32bcfee27a0aa3b19733902af450acc"
 dependencies = [
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "monitor_lib"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "crossbeam-channel",
- "hex",
- "iced-x86",
- "lazy_static",
- "log",
- "once_cell",
- "patternscan",
- "pelite",
- "retour",
- "serde",
- "serde_json",
- "sha2",
- "simple_logger",
- "widestring 0.5.1",
- "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3067,6 +3080,21 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "shannon-entropy"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f4053bd8efd870677b67f018147024c268c1b570459483c73a2c527b98e279"
+
+[[package]]
+name = "shared"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

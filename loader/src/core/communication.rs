@@ -50,25 +50,16 @@ pub fn start_pipe_log_listener(pipe_handle: isize, logger: Sender<String>) {
     });
 }
 
-pub fn connect_and_send_config(
-    pid: u32,
-    config: &MonitorConfig,
-    pipe_handle_arc: Arc<Mutex<Option<isize>>>,
-    status_arc: Arc<Mutex<String>>,
-    logger: Sender<String>,
-) -> bool {
-    let pipe_name = format!(r"\\.\pipe\cs2_monitor_{}", pid);
-    let wide_pipe_name = U16CString::from_str(&pipe_name).unwrap();
+fn connect_to_pipe(pipe_name: &str, access: u32, status_arc: Arc<Mutex<String>>) -> Option<isize> {
+    let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
     const MAX_RETRIES: u32 = 10; // Total wait time up to 10 * 500ms = 5 seconds
     const RETRY_DELAY_MS: u64 = 500;
 
-    let mut pipe_handle = INVALID_HANDLE_VALUE;
-
     for i in 0..MAX_RETRIES {
-        pipe_handle = unsafe {
+        let pipe_handle = unsafe {
             CreateFileW(
                 wide_pipe_name.as_ptr(),
-                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                access,
                 0,
                 std::ptr::null(),
                 OPEN_EXISTING,
@@ -78,66 +69,86 @@ pub fn connect_and_send_config(
         };
 
         if pipe_handle != INVALID_HANDLE_VALUE {
-            break; // Success
+            return Some(pipe_handle); // Success
         }
 
         let err = unsafe { GetLastError() };
         if err != ERROR_PIPE_BUSY {
-            *status_arc.lock().unwrap() = format!("Failed to connect to pipe. Error: {}", err);
-            return false;
+            *status_arc.lock().unwrap() = format!("Failed to connect to pipe '{}'. Error: {}", pipe_name, err);
+            return None;
         }
 
         *status_arc.lock().unwrap() =
-            format!("Pipe is busy, retrying... ({}/{})", i + 1, MAX_RETRIES);
+            format!("Pipe '{}' is busy, retrying... ({}/{})", pipe_name, i + 1, MAX_RETRIES);
         thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
     }
 
-    if pipe_handle != INVALID_HANDLE_VALUE {
-        let mut pipe_handle_guard = pipe_handle_arc.lock().unwrap();
-        *pipe_handle_guard = Some(pipe_handle);
-        drop(pipe_handle_guard);
+    *status_arc.lock().unwrap() = format!("Failed to connect to pipe '{}' after {} retries.", pipe_name, MAX_RETRIES);
+    None
+}
 
-        // --- Standardized Communication ---
-        // Wrap the config in an `UpdateConfig` command and send it as a newline-terminated JSON string.
-        let command = Command::UpdateConfig(*config);
-        let command_json = match serde_json::to_string(&command) {
-            Ok(json) => json,
-            Err(e) => {
-                *status_arc.lock().unwrap() = format!("Failed to serialize config: {}", e);
-                return false;
-            }
-        };
-        let command_to_send = format!("{}\n", command_json);
-        let bytes_to_send = command_to_send.as_bytes();
+pub fn setup_communication(
+    pid: u32,
+    config: &MonitorConfig,
+    cmd_pipe_handle_arc: Arc<Mutex<Option<isize>>>,
+    log_pipe_handle_arc: Arc<Mutex<Option<isize>>>,
+    status_arc: Arc<Mutex<String>>,
+    logger: Sender<String>,
+) -> bool {
+    // Connect to the command pipe (write-only)
+    let cmd_pipe_name = format!("\\\\.\\pipe\\cs2_monitor_cmd_{{}}", pid);
+    let cmd_pipe_handle = match connect_to_pipe(&cmd_pipe_name, FILE_GENERIC_WRITE, status_arc.clone()) {
+        Some(handle) => handle,
+        None => return false, // Error already logged by connect_to_pipe
+    };
+    *cmd_pipe_handle_arc.lock().unwrap() = Some(cmd_pipe_handle);
 
-        let mut bytes_written = 0;
-        let success = unsafe {
-            WriteFile(
-                pipe_handle,
-                bytes_to_send.as_ptr(),
-                bytes_to_send.len() as u32,
-                &mut bytes_written,
-                std::ptr::null_mut(),
-            )
-        };
+    // Connect to the log pipe (read-only)
+    let log_pipe_name = format!("\\\\.\\pipe\\cs2_monitor_log_{{}}", pid);
+    let log_pipe_handle = match connect_to_pipe(&log_pipe_name, FILE_GENERIC_READ, status_arc.clone()) {
+        Some(handle) => handle,
+        None => return false, // Error already logged by connect_to_pipe
+    };
+    *log_pipe_handle_arc.lock().unwrap() = Some(log_pipe_handle);
 
-        if success == 0 || bytes_written as usize != bytes_to_send.len() {
-            let err = unsafe { GetLastError() };
-            *status_arc.lock().unwrap() = format!(
-                "Failed to write config to pipe (wrote {}/{} bytes): {}",
-                bytes_written,
-                bytes_to_send.len(),
-                err
-            );
+    // --- Send Initial Configuration via Command Pipe ---
+    let command = Command::UpdateConfig(*config);
+    let command_json = match serde_json::to_string(&command) {
+        Ok(json) => json,
+        Err(e) => {
+            *status_arc.lock().unwrap() = format!("Failed to serialize config: {{}}", e);
             return false;
         }
+    };
+    let command_to_send = format!("{{}}\n", command_json);
+    let bytes_to_send = command_to_send.as_bytes();
 
-        *status_arc.lock().unwrap() = "Configuration sent. Monitoring...".to_string();
-        start_pipe_log_listener(pipe_handle, logger);
-        true
-    } else {
+    let mut bytes_written = 0;
+    let success = unsafe {
+        WriteFile(
+            cmd_pipe_handle,
+            bytes_to_send.as_ptr(),
+            bytes_to_send.len() as u32,
+            &mut bytes_written,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if success == 0 || bytes_written as usize != bytes_to_send.len() {
         let err = unsafe { GetLastError() };
-        *status_arc.lock().unwrap() = format!("Failed to connect to pipe: {}", err);
-        false
+        *status_arc.lock().unwrap() = format!(
+            "Failed to write config to pipe (wrote {{}}/{{}} bytes): {{}}",
+            bytes_written,
+            bytes_to_send.len(),
+            err
+        );
+        return false;
     }
+
+    *status_arc.lock().unwrap() = "Configuration sent. Monitoring...".to_string();
+    
+    // --- Start Log Listener on Log Pipe ---
+    start_pipe_log_listener(log_pipe_handle, logger);
+    
+    true
 }

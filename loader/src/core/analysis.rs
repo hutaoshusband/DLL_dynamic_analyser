@@ -24,7 +24,8 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
     let monitor_config = state.monitor_config;
     let process_id = state.process_id.clone();
     let process_handle = state.process_handle.clone();
-    let pipe_handle = state.pipe_handle.clone();
+    let cmd_pipe_handle = state.cmd_pipe_handle.clone();
+    let log_pipe_handle = state.log_pipe_handle.clone();
     let injection_status = state.injection_status.clone();
 
     let handle = thread::spawn(move || {
@@ -39,7 +40,8 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
                         monitor_config,
                         process_id.clone(),
                         process_handle.clone(),
-                        pipe_handle.clone(),
+                        cmd_pipe_handle.clone(),
+                        log_pipe_handle.clone(),
                         is_process_running.clone(),
                         injection_status.clone(),
                     );
@@ -60,7 +62,8 @@ pub fn start_analysis_thread(
     config: MonitorConfig,
     pid_arc: Arc<Mutex<Option<u32>>>,
     handle_arc: Arc<Mutex<Option<isize>>>,
-    pipe_arc: Arc<Mutex<Option<isize>>>,
+    cmd_pipe_arc: Arc<Mutex<Option<isize>>>,
+    log_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
 ) {
@@ -74,7 +77,8 @@ pub fn start_analysis_thread(
             config,
             pid_arc,
             handle_arc,
-            pipe_arc,
+            cmd_pipe_arc,
+            log_pipe_arc,
             running_arc,
             status_arc,
         );
@@ -89,7 +93,8 @@ fn run_analysis(
     config: MonitorConfig,
     pid_arc: Arc<Mutex<Option<u32>>>,
     handle_arc: Arc<Mutex<Option<isize>>>,
-    pipe_arc: Arc<Mutex<Option<isize>>>,
+    cmd_pipe_arc: Arc<Mutex<Option<isize>>>,
+    log_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
 ) {
@@ -118,22 +123,21 @@ fn run_analysis(
             *handle_arc.lock().unwrap() = Some(handle);
             thread::sleep(Duration::from_millis(500)); // Wait for DLL to initialize
 
-            if communication::connect_and_send_config(
+            if communication::setup_communication(
                 pid,
                 &config,
-                pipe_arc.clone(),
+                cmd_pipe_arc.clone(),
+                log_pipe_arc.clone(),
                 status_arc.clone(),
                 logger.clone(),
             ) {
-                let running_clone = running_arc.clone();
-                let status_clone = status_arc.clone();
-                thread::spawn(move || {
-                    unsafe { WaitForSingleObject(handle, u32::MAX) };
-                    if running_clone.load(Ordering::SeqCst) {
-                        *status_clone.lock().unwrap() = "Process terminated.".to_string();
-                        running_clone.store(false, Ordering::SeqCst);
-                    }
-                });
+                // Block the analysis thread until the process terminates.
+                // This is crucial to keep the pipe handle alive.
+                unsafe { WaitForSingleObject(handle, u32::MAX) };
+                if running_arc.load(Ordering::SeqCst) {
+                    *status_arc.lock().unwrap() = "Process terminated.".to_string();
+                    running_arc.store(false, Ordering::SeqCst);
+                }
             } else {
                 running_arc.store(false, Ordering::SeqCst);
             }
