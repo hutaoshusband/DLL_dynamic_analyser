@@ -88,20 +88,27 @@ pub fn connect_and_send_config(
         drop(pipe_handle_guard); // Release lock before potentially long operations
 
         let config_json = serde_json::to_string(config).unwrap();
+        let config_bytes = config_json.as_bytes();
+        let config_len = config_bytes.len() as u32;
+
+        // Prepend the size of the JSON data to the message.
+        let mut data_to_send = Vec::with_capacity(4 + config_bytes.len());
+        data_to_send.extend_from_slice(&config_len.to_ne_bytes());
+        data_to_send.extend_from_slice(config_bytes);
+
         let mut bytes_written = 0;
         let success = unsafe {
             WriteFile(
                 pipe_handle,
-                config_json.as_ptr(),
-                config_json.len() as u32,
+                data_to_send.as_ptr() as *const _,
+                data_to_send.len() as u32,
                 &mut bytes_written,
                 std::ptr::null_mut(),
             )
         };
-
-        if success == 0 {
+        if success == 0 || bytes_written as usize != data_to_send.len() {
             let err = unsafe { GetLastError() };
-            *status_arc.lock().unwrap() = format!("Failed to write config to pipe: {}", err);
+            *status_arc.lock().unwrap() = format!("Failed to write config to pipe (wrote {}/{} bytes): {}", bytes_written, data_to_send.len(), err);
             return false;
         }
 

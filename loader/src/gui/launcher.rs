@@ -35,20 +35,19 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                 // Preset selection
                 ui.horizontal(|ui| {
                     ui.label("Monitoring Preset:");
+                    let mut preset_changed = false;
                     let selected_preset_text = format!("{:?}", state.selected_preset);
                     egui::ComboBox::from_id_source("preset_selector")
                         .selected_text(selected_preset_text)
                         .show_ui(ui, |ui| {
-                            if ui.selectable_value(&mut state.selected_preset, Preset::Stealth, "Stealth").changed() {
-                                state.monitor_config = MonitorConfig::from_preset(Preset::Stealth);
-                            }
-                            if ui.selectable_value(&mut state.selected_preset, Preset::Balanced, "Balanced").changed() {
-                                state.monitor_config = MonitorConfig::from_preset(Preset::Balanced);
-                            }
-                            if ui.selectable_value(&mut state.selected_preset, Preset::Aggressive, "Aggressive").changed() {
-                                state.monitor_config = MonitorConfig::from_preset(Preset::Aggressive);
-                            }
+                            preset_changed |= ui.selectable_value(&mut state.selected_preset, Preset::Stealth, "Stealth").changed();
+                            preset_changed |= ui.selectable_value(&mut state.selected_preset, Preset::Balanced, "Balanced").changed();
+                            preset_changed |= ui.selectable_value(&mut state.selected_preset, Preset::Aggressive, "Aggressive").changed();
                         });
+
+                    if preset_changed {
+                        state.monitor_config = MonitorConfig::from_preset(state.selected_preset);
+                    }
                 });
 
                 ui.separator();
