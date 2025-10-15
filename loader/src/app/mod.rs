@@ -29,7 +29,7 @@ impl eframe::App for App {
         while let Ok(log_json) = self.log_receiver.try_recv() {
             state.handle_log(&log_json);
         }
-        
+
         // Custom window frame for the "frosted glass" look
         let panel_frame = egui::Frame {
             fill: ctx.style().visuals.window_fill(),

@@ -1,76 +1,202 @@
-use eframe::egui::{self, Color32, Ui};
-use shared::logging::{LogEntry, LogEvent, LogLevel};
+use eframe::egui::{self, Ui};
 
 use crate::app::state::AppState;
+use crate::core::injection;
+use shared::Command;
 
-use egui::{Align, Frame, Layout};
+pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppState) {
+    ui.collapsing("DLLs in Target Process", |ui| {
+        ui.horizontal(|ui| {
+            if ui.button("Refresh Modules").clicked() {
+                if let Some(pid) = *state.process_id.lock().unwrap() {
+                    match injection::get_modules_for_process(pid) {
+                        Ok(modules) => *state.modules.lock().unwrap() = modules,
+                        Err(e) => {
+                            let _ = state
+                                .log_sender
+                                .send(format!("Error getting modules: {}", e));
+                        }
+                    }
+                }
+            }
+        });
 
-pub fn render_network_activity_tab(ui: &mut Ui, state: &mut AppState) {
-    ui.with_layout(Layout::top_down(Align::Center), |ui| {
-        let terminal_frame = Frame::central_panel(&ui.style())
-            .fill(Color32::from_rgb(10, 10, 15)) // Darker, terminal-like background
-            .inner_margin(egui::Margin::same(10.0));
+        let modules_guard = state.modules.lock().unwrap();
+        let module_names: Vec<String> = modules_guard.iter().map(|m| m.name.clone()).collect();
+        let selected_module_name = state
+            .selected_module_index
+            .and_then(|i| module_names.get(i).cloned())
+            .unwrap_or_else(|| "No Module Selected".to_string());
 
-        terminal_frame.show(ui, |ui| {
-            ui.set_max_width(ui.available_width() * 0.9);
-            ui.set_max_height(ui.available_height() * 0.95);
-            
-            let network_events = [
-                "connect", "HttpSendRequestW", "GetAddrInfoW", "WSASend", "send",
-                "InternetOpenW", "InternetConnectW", "HttpOpenRequestW",
-                "InternetReadFile", "DnsQuery_A", "DnsQuery_W"
-            ];
+        egui::ComboBox::from_label("Target Module")
+            .selected_text(selected_module_name)
+            .show_ui(ui, |ui| {
+                for (i, name) in module_names.iter().enumerate() {
+                    if ui
+                        .selectable_label(state.selected_module_index == Some(i), name)
+                        .clicked()
+                    {
+                        state.selected_module_index = Some(i);
+                    }
+                }
+            });
+    });
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for (log_entry, count) in &state.logs {
-                        if let LogEvent::ApiHook { function_name, .. } = &log_entry.event {
-                            if network_events.contains(&function_name.as_str()) {
-                                render_log_entry(ui, log_entry, *count);
+    ui.collapsing("Memory Sections", |ui| {
+        if ui.button("Refresh Sections").clicked() {
+            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
+                if let Some(module_index) = state.selected_module_index {
+                    let modules = state.modules.lock().unwrap();
+                    if let Some(module) = modules.get(module_index) {
+                        let command = Command::ListSections {
+                            module_name: module.name.clone(),
+                        };
+                        if let Ok(command_json) = serde_json::to_string(&command) {
+                            let command_to_send = format!("{}\n", command_json);
+                            unsafe {
+                                windows_sys::Win32::Storage::FileSystem::WriteFile(
+                                    pipe_handle,
+                                    command_to_send.as_ptr(),
+                                    command_to_send.len() as u32,
+                                    &mut 0,
+                                    std::ptr::null_mut(),
+                                );
                             }
                         }
                     }
-                });
-        });
-    });
-}
-
-fn render_log_entry(ui: &mut Ui, log_entry: &LogEntry, count: usize) {
-    let (color, level_str) = get_level_display(log_entry.level);
-    let timestamp = log_entry.timestamp.format("%H:%M:%S%.3f").to_string();
-
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("[{}]", timestamp)).monospace().color(Color32::GRAY));
-        ui.label(egui::RichText::new(level_str).monospace().color(color));
-
-        if let LogEvent::ApiHook { function_name, parameters, .. } = &log_entry.event {
-            ui.label(egui::RichText::new(function_name).monospace().strong());
-
-            if let Some(params_obj) = parameters.as_object() {
-                let mut param_strings = Vec::new();
-                for (key, value) in params_obj {
-                    param_strings.push(format!("{}: {}", key, value.to_string().trim_matches('\"')));
                 }
-                ui.label(egui::RichText::new(param_strings.join(", ")).monospace());
             }
         }
 
-        if count > 1 {
-            ui.label(egui::RichText::new(format!("(x{})", count)).color(Color32::GOLD));
-        }
-    });
-}
+        egui::ScrollArea::vertical()
+            .max_height(200.0)
+            .show(ui, |ui| {
+                let sections = state.sections.lock().unwrap().clone();
+                for section in sections.iter() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(
+                                state.selected_section_name == Some(section.name.clone()),
+                                &section.name,
+                            )
+                            .clicked()
+                        {
+                            state.selected_section_name = Some(section.name.clone());
+                        }
+                        ui.label(format!(
+                            "Address: {:#X}, Size: {} bytes",
+                            section.virtual_address, section.virtual_size
+                        ));
+                        let module_name = state.selected_module_index.and_then(|i| {
+                            let modules = state.modules.lock().unwrap();
+                            modules.get(i).map(|m| m.name.clone())
+                        }).unwrap_or_default();
 
-fn get_level_display(level: LogLevel) -> (Color32, &'static str) {
-    match level {
-        LogLevel::Fatal => (Color32::from_rgb(255, 0, 0),   "FATAL"),
-        LogLevel::Error => (Color32::from_rgb(255, 80, 80),  "ERROR"),
-        LogLevel::Success => (Color32::from_rgb(0, 255, 0), "SUCCESS"),
-        LogLevel::Warn => (Color32::from_rgb(255, 255, 0), "WARN "),
-        LogLevel::Info => (Color32::from_rgb(173, 216, 230), "INFO "),
-        LogLevel::Debug => (Color32::from_rgb(128, 128, 128), "DEBUG"),
-        LogLevel::Trace => (Color32::from_rgb(211, 211, 211), "TRACE"),
-    }
+                        if ui.button("Dump").clicked() {
+                            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
+                                let command = Command::DumpSection {
+                                    module_name: module_name.clone(),
+                                    name: section.name.clone(),
+                                };
+                                if let Ok(command_json) = serde_json::to_string(&command) {
+                                    let command_to_send = format!("{}\n", command_json);
+                                    unsafe {
+                                        windows_sys::Win32::Storage::FileSystem::WriteFile(
+                                            pipe_handle,
+                                            command_to_send.as_ptr(),
+                                            command_to_send.len() as u32,
+                                            &mut 0,
+                                            std::ptr::null_mut(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Entropy Scan").clicked() {
+                            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
+                                let command = Command::CalculateEntropy {
+                                    module_name: module_name.clone(),
+                                    name: section.name.clone(),
+                                };
+                                if let Ok(command_json) = serde_json::to_string(&command) {
+                                     let command_to_send = format!("{}\n", command_json);
+                                    unsafe {
+                                        windows_sys::Win32::Storage::FileSystem::WriteFile(
+                                            pipe_handle,
+                                            command_to_send.as_ptr(),
+                                            command_to_send.len() as u32,
+                                            &mut 0,
+                                            std::ptr::null_mut(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+    });
+
+    ui.collapsing("Entropy Viewer", |ui| {
+        use egui_plot::{Line, Plot, PlotPoints};
+
+        ui.horizontal(|ui| {
+            ui.label("This view shows the entropy of each memory section of the target process.");
+            if ui.button("Clear Results").clicked() {
+                state.entropy_results.lock().unwrap().clear();
+            }
+        });
+        ui.separator();
+
+        let sections = state.sections.lock().unwrap().clone();
+        let entropy_results = state.entropy_results.lock().unwrap();
+
+        if sections.is_empty() {
+            ui.label("No sections loaded. Refresh sections first.");
+            return;
+        }
+
+        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+            for section in sections.iter() {
+                ui.collapsing(section.name.clone(), |ui| {
+                    let mut annotations = Vec::new();
+                    if section.name.starts_with(".vmp") {
+                        annotations.push("VMProtect section detected!".to_string());
+                    }
+
+                    if let Some(entropy) = entropy_results.get(&section.name) {
+                        if entropy.is_empty() {
+                            ui.label("Entropy data is empty for this section.");
+                            return;
+                        }
+                        let high_entropy_threshold = 7.5;
+                        let average_entropy = entropy.iter().sum::<f32>() / entropy.len() as f32;
+                        if average_entropy > high_entropy_threshold {
+                            annotations.push(format!("High entropy ({:.2}) suggests packed/encrypted data.", average_entropy));
+                        }
+
+                        let points: PlotPoints = entropy
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &y)| [i as f64, y as f64])
+                            .collect();
+                        let line = Line::new(points);
+                        Plot::new(&section.name)
+                            .view_aspect(2.0)
+                            .show(ui, |plot_ui| plot_ui.line(line));
+                    } else {
+                        ui.label("No entropy data available. Perform an 'Entropy Scan' for this section.");
+                    }
+
+                    if !annotations.is_empty() {
+                        ui.separator();
+                        ui.label("Annotations:");
+                        for annotation in annotations {
+                            ui.label(annotation);
+                        }
+                    }
+                });
+            }
+        });
+    });
 }
