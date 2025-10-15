@@ -36,60 +36,81 @@ impl eframe::App for App {
             ..egui::Frame::central_panel(&ctx.style())
         };
 
+        // Custom title bar and centered tabs
+        egui::TopBottomPanel::top("title_bar")
+            .show(ctx, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                let response = ui.interact(rect, ui.id(), egui::Sense::drag());
+                if response.dragged() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                let mut content_ui = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center));
+                content_ui.horizontal(|ui| {
+                    let tabs = [
+                        (ActiveTab::Launcher, "🚀 Launcher"),
+                        (ActiveTab::Logs, "📜 Logs"),
+                        (ActiveTab::MemoryAnalysis, "🧠 Memory Analysis"),
+                        (ActiveTab::Hooking, "🎣 Hooking"),
+                        (ActiveTab::Network, "🌐 Network"),
+                    ];
+
+                    // Calculate tabs width
+                    let mut tabs_width = 0.0;
+                    let style = ui.style();
+                    let font_id = egui::TextStyle::Button.resolve(style);
+                    let button_padding = style.spacing.button_padding;
+                    let item_spacing = style.spacing.item_spacing.x;
+                    let min_button_size = egui::vec2(100.0, 30.0);
+
+                    for (_, title) in tabs.iter() {
+                        let text_size = ui.painter().layout_no_wrap(title.to_string(), font_id.clone(), style.visuals.text_color()).size();
+                        let button_width = (text_size.x + button_padding.x * 2.0).max(min_button_size.x);
+                        tabs_width += button_width;
+                    }
+                    tabs_width += (tabs.len() - 1) as f32 * item_spacing;
+
+                    let available_width = ui.available_width();
+                    let close_button_width = 30.0; // From add_sized
+                    let spacer_width = (available_width - tabs_width - close_button_width) / 2.0;
+
+                    ui.add_space(spacer_width);
+
+                    // Render tabs
+                    for (tab, title) in tabs.iter() {
+                        let is_active = state.active_tab == *tab;
+                        let button = egui::Button::new(*title)
+                            .frame(false)
+                            .min_size(egui::vec2(100.0, 30.0));
+                        let response = ui.add(button);
+
+                        if is_active {
+                            let rect = response.rect;
+                            ui.painter().line_segment(
+                                [rect.left_bottom() + egui::vec2(0.0, -5.0), rect.right_bottom() + egui::vec2(0.0, -5.0)],
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(0x33, 0xCC, 0xFF))
+                            );
+                        }
+
+                        if response.clicked() {
+                            state.active_tab = *tab;
+                        }
+                    }
+
+                    // Close button on the right
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add_sized([30.0, 30.0], egui::Button::new("❌")).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
+                });
+            });
+
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
-                // Custom title bar and centered tabs
-                egui::TopBottomPanel::top("title_bar")
-                    .show(ctx, |ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            // Title bar drag area
-                            let title_bar_rect = ui.min_rect();
-                            let response = ui.interact(
-                                title_bar_rect,
-                                egui::Id::new("title_bar_drag"),
-                                egui::Sense::drag(),
-                            );
-                            if response.dragged() {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                            }
-                            
-                            // Center the tabs
-                            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                                ui.horizontal(|ui| {
-                                    let tabs = [
-                                        (ActiveTab::Launcher, "🚀 Launcher"),
-                                        (ActiveTab::Logs, "📜 Logs"),
-                                        (ActiveTab::MemoryAnalysis, "🧠 Memory Analysis"),
-                                        (ActiveTab::Hooking, "🎣 Hooking"),
-                                        (ActiveTab::Network, "🌐 Network"),
-                                    ];
-        
-                                    for (tab, title) in tabs.iter() {
-                                        let is_active = state.active_tab == *tab;
-                                        let mut button = egui::Button::new(*title);
-                                        if is_active {
-                                            button = button.fill(ui.style().visuals.selection.bg_fill);
-                                        } else {
-                                            button = button.frame(false);
-                                        }
-                                        if ui.add(button).clicked() {
-                                            state.active_tab = *tab;
-                                        }
-                                    }
-                                });
-                            });
-
-                            // Close button on the right
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("❌").clicked() {
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                }
-                            });
-                        });
-                    });
+                // Add a separator and space for visual clarity
                 ui.add(egui::Separator::default().spacing(10.0));
-
 
                 // Render the content for the active tab
                 crate::gui::render_active_tab(ctx, ui, &mut state);
