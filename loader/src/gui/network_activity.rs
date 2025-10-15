@@ -3,28 +3,38 @@ use shared::logging::{LogEntry, LogEvent, LogLevel};
 
 use crate::app::state::AppState;
 
+use egui::{Align, Frame, Layout};
+
 pub fn render_network_activity_tab(ui: &mut Ui, state: &mut AppState) {
-    ui.heading("Live Network Activity");
-    ui.separator();
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        let terminal_frame = Frame::central_panel(&ui.style())
+            .fill(Color32::from_rgb(10, 10, 15)) // Darker, terminal-like background
+            .inner_margin(egui::Margin::same(10.0));
 
-    let network_events = [
-        "connect", "HttpSendRequestW", "GetAddrInfoW", "WSASend", "send",
-        "InternetOpenW", "InternetConnectW", "HttpOpenRequestW",
-        "InternetReadFile", "DnsQuery_A", "DnsQuery_W"
-    ];
+        terminal_frame.show(ui, |ui| {
+            ui.set_max_width(ui.available_width() * 0.9);
+            ui.set_max_height(ui.available_height() * 0.95);
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for (log_entry, count) in &state.logs {
-                if let LogEvent::ApiHook { function_name, .. } = &log_entry.event {
-                    if network_events.contains(&function_name.as_str()) {
-                        render_log_entry(ui, log_entry, *count);
+            let network_events = [
+                "connect", "HttpSendRequestW", "GetAddrInfoW", "WSASend", "send",
+                "InternetOpenW", "InternetConnectW", "HttpOpenRequestW",
+                "InternetReadFile", "DnsQuery_A", "DnsQuery_W"
+            ];
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for (log_entry, count) in &state.logs {
+                        if let LogEvent::ApiHook { function_name, .. } = &log_entry.event {
+                            if network_events.contains(&function_name.as_str()) {
+                                render_log_entry(ui, log_entry, *count);
+                            }
+                        }
                     }
-                }
-            }
+                });
         });
+    });
 }
 
 fn render_log_entry(ui: &mut Ui, log_entry: &LogEntry, count: usize) {

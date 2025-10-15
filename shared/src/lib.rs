@@ -20,9 +20,9 @@ impl Default for Preset {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Command {
-    ListSections,
-    DumpSection { name: String },
-    CalculateEntropy { name: String },
+    ListSections { module_name: String },
+    DumpSection { module_name: String, name: String },
+    CalculateEntropy { module_name: String, name: String },
     UpdateConfig(MonitorConfig),
     DumpModule { module_name: String },
 }

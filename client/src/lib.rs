@@ -337,9 +337,9 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
                 debug_log(&format!("Received command string: {}", command_str));
 
                 match serde_json::from_str::<Command>(command_str) {
-                    Ok(Command::ListSections) => handle_list_sections(),
-                    Ok(Command::DumpSection { name }) => handle_dump_section(&name),
-                    Ok(Command::CalculateEntropy { name }) => handle_calculate_entropy(&name),
+                    Ok(Command::ListSections { module_name }) => handle_list_sections(&module_name),
+                    Ok(Command::DumpSection { module_name, name }) => handle_dump_section(&module_name, &name),
+                    Ok(Command::CalculateEntropy { module_name, name }) => handle_calculate_entropy(&module_name, &name),
                     Ok(Command::UpdateConfig(new_config)) => {
                         debug_log(&format!("Updating config: {:?}", new_config));
                         let mut config_guard = CONFIG.features.write().unwrap();
@@ -390,29 +390,28 @@ fn shannon_entropy(data: &[u8]) -> f32 {
 use pelite::pe64::{Pe, PeFile};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
-// Helper function to safely access and parse the current module's PE file.
-// This encapsulates the repetitive and unsafe logic of reading the PE headers
-// and provides a safe way to operate on the parsed file via a closure.
-fn with_pe_file<F, R>(source_name: &str, closure: F) -> Option<R>
+// Helper function to safely access and parse a specific module's PE file.
+fn with_pe_file<F, R>(source_name: &str, module_name: &str, closure: F) -> Option<R>
 where
     F: FnOnce(PeFile) -> R,
 {
     unsafe {
-        let base = GetModuleHandleW(std::ptr::null());
+        let wide_module_name = U16CString::from_str(module_name).unwrap();
+        let base = GetModuleHandleW(wide_module_name.as_ptr());
+
         if base == 0 {
             log_event(LogLevel::Error, LogEvent::Error {
                 source: source_name.to_string(),
-                message: "Failed to get main module handle.".to_string(),
+                message: format!("Failed to get handle for module: {}", module_name),
             });
             return None;
         }
 
-        // Manually parse headers to get the image size, as `from_module` is not available.
         let dos_header = &*(base as *const pelite::image::IMAGE_DOS_HEADER);
         if dos_header.e_magic != pelite::image::IMAGE_DOS_SIGNATURE {
             log_event(LogLevel::Error, LogEvent::Error {
                 source: source_name.to_string(),
-                message: "Invalid DOS signature for main module.".to_string(),
+                message: format!("Invalid DOS signature for module: {}", module_name),
             });
             return None;
         }
@@ -420,9 +419,9 @@ where
         let nt_headers = &*((base as *const u8).add(dos_header.e_lfanew as usize)
             as *const pelite::image::IMAGE_NT_HEADERS64);
         if nt_headers.Signature != 0x00004550 { // "PE\0\0"
-             log_event(LogLevel::Error, LogEvent::Error {
+            log_event(LogLevel::Error, LogEvent::Error {
                 source: source_name.to_string(),
-                message: "Invalid NT signature for main module.".to_string(),
+                message: format!("Invalid NT signature for module: {}", module_name),
             });
             return None;
         }
@@ -435,7 +434,7 @@ where
             Err(e) => {
                 log_event(LogLevel::Error, LogEvent::Error {
                     source: source_name.to_string(),
-                    message: format!("Failed to parse PE file from bytes: {}", e),
+                    message: format!("Failed to parse PE file for {}: {}", module_name, e),
                 });
                 None
             }
@@ -443,9 +442,9 @@ where
     }
 }
 
-fn handle_calculate_entropy(section_name: &str) {
-    debug_log(&format!("Handling CalculateEntropy for section: {}", section_name));
-    with_pe_file("handle_calculate_entropy", |file| {
+fn handle_calculate_entropy(module_name: &str, section_name: &str) {
+    debug_log(&format!("Handling CalculateEntropy for section: {} in module: {}", section_name, module_name));
+    with_pe_file("handle_calculate_entropy", module_name, |file| {
         for section in file.section_headers() {
             if let Ok(name) = section.name() {
                 if name == section_name {
@@ -465,9 +464,9 @@ fn handle_calculate_entropy(section_name: &str) {
     });
 }
 
-fn handle_dump_section(section_name: &str) {
-    debug_log(&format!("Handling DumpSection for section: {}", section_name));
-    with_pe_file("handle_dump_section", |file| {
+fn handle_dump_section(module_name: &str, section_name: &str) {
+    debug_log(&format!("Handling DumpSection for section: {} in module: {}", section_name, module_name));
+    with_pe_file("handle_dump_section", module_name, |file| {
         for section in file.section_headers() {
             if let Ok(name) = section.name() {
                 if name == section_name {
@@ -483,17 +482,19 @@ fn handle_dump_section(section_name: &str) {
     });
 }
 
-fn handle_list_sections() {
-    debug_log("Handling ListSections command.");
-    with_pe_file("handle_list_sections", |file| {
-        let sections = file.section_headers().iter().map(|s| {
-            SectionInfo {
+fn handle_list_sections(module_name: &str) {
+    debug_log(&format!("Handling ListSections for module: {}", module_name));
+    with_pe_file("handle_list_sections", module_name, |file| {
+        let sections = file
+            .section_headers()
+            .iter()
+            .map(|s| SectionInfo {
                 name: s.name().unwrap_or("").to_string(),
                 virtual_address: s.VirtualAddress as usize,
                 virtual_size: s.VirtualSize as usize,
                 characteristics: s.Characteristics,
-            }
-        }).collect();
+            })
+            .collect();
         log_event(LogLevel::Info, LogEvent::SectionList { sections });
     });
 }
