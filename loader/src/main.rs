@@ -29,8 +29,8 @@ fn main() -> Result<(), eframe::Error> {
 }
 
 fn create_custom_style() -> Style {
-    let background = Color32::from_rgba_unmultiplied(30, 30, 46, 220);
-    let panel_fill = Color32::from_rgba_unmultiplied(24, 24, 37, 230);
+    let background = Color32::from_rgba_unmultiplied(30, 30, 46, 180); // Lower alpha for more transparency
+    let panel_fill = Color32::from_rgba_unmultiplied(24, 24, 37, 190); // Lower alpha
     let accent_blue = Color32::from_rgb(137, 180, 250);
     let text_color = Color32::from_rgb(205, 214, 244);
     let faint_text = Color32::from_rgb(127, 132, 156);
@@ -41,7 +41,7 @@ fn create_custom_style() -> Style {
         override_text_color: Some(text_color),
         window_rounding: Rounding::same(12.0),
         window_shadow: egui::epaint::Shadow::NONE,
-        window_fill: background,
+        window_fill: Color32::TRANSPARENT, // Make window background fully transparent
         window_stroke: Stroke::new(1.0, Color32::from_gray(60)),
         panel_fill,
         extreme_bg_color: Color32::from_gray(10),

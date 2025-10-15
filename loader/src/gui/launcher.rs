@@ -13,11 +13,13 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
     let mut auto_inject_clicked = false;
     let mut auto_inject_enabled = state.auto_inject_enabled.load(Ordering::SeqCst);
 
-    ui.heading("Analysis Launcher");
-    ui.separator();
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.heading("Analysis Launcher");
+        ui.separator();
 
-            // --- Target Selection ---
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+        // --- Target Selection ---
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.heading("Target Selection");
                 ui.horizontal(|ui| {
                     ui.label("Target Process Name:");
@@ -28,9 +30,11 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                     ui.text_edit_singleline(&mut state.manual_injection_pid);
                 });
             });
+        });
 
-            // --- Injection Controls ---
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+        // --- Injection Controls ---
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.heading("Injection Controls");
 
                 // Preset selection
@@ -63,7 +67,7 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                         let name_to_use = if pid_to_use.is_none() { Some(state.target_process_name.clone()) } else { None };
 
                         if let Some(dll_path) = state.dll_path.clone() {
-                             analysis::start_analysis_thread(
+                            analysis::start_analysis_thread(
                                 state.log_sender.clone(),
                                 name_to_use,
                                 pid_to_use,
@@ -89,13 +93,14 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                     }
                 });
             });
+        });
 
-
-            ui.separator();
-            ui.label(format!("Status: {}", *state.injection_status.lock().unwrap()));
-             if state.dll_path.is_none() {
-                ui.colored_label(egui::Color32::RED, "client.dll not found in the application directory.");
-            }
+        ui.separator();
+        ui.label(format!("Status: {}", *state.injection_status.lock().unwrap()));
+        if state.dll_path.is_none() {
+            ui.colored_label(egui::Color32::RED, "client.dll not found in the application directory.");
+        }
+    });
 
     if auto_inject_clicked {
         state.auto_inject_enabled.store(auto_inject_enabled, Ordering::SeqCst);

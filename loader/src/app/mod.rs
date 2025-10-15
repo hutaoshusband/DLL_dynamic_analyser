@@ -32,25 +32,27 @@ impl eframe::App for App {
 
         // Custom window frame for the "frosted glass" look
         let panel_frame = egui::Frame {
-            fill: ctx.style().visuals.window_fill(),
+            fill: egui::Color32::TRANSPARENT, // Make the central panel transparent
             ..egui::Frame::central_panel(&ctx.style())
         };
 
         // Custom title bar and centered tabs
         egui::TopBottomPanel::top("title_bar")
+            .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
+            .exact_height(40.0) // Set a fixed height
             .show(ctx, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                let response = ui.interact(rect, ui.id(), egui::Sense::drag());
+                // Allow dragging the window by the title bar
+                let response = ui.interact(ui.max_rect(), ui.id(), egui::Sense::drag());
                 if response.dragged() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
 
-                let mut content_ui = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center));
-                content_ui.horizontal(|ui| {
+                // Center the content vertically
+                ui.with_layout(egui::Layout::from_main_dir_and_cross_align(egui::Direction::LeftToRight, egui::Align::Center), |ui| {
                     let tabs = [
                         (ActiveTab::Launcher, "🚀 Launcher"),
                         (ActiveTab::Logs, "📜 Logs"),
-                        (ActiveTab::MemoryAnalysis, "🧠 Memory Analysis"),
+                        (ActiveTab::MemoryAnalysis, "💾 Memory Analysis"),
                         (ActiveTab::Hooking, "🎣 Hooking"),
                         (ActiveTab::Network, "🌐 Network"),
                     ];
@@ -61,7 +63,7 @@ impl eframe::App for App {
                     let font_id = egui::TextStyle::Button.resolve(style);
                     let button_padding = style.spacing.button_padding;
                     let item_spacing = style.spacing.item_spacing.x;
-                    let min_button_size = egui::vec2(100.0, 30.0);
+                    let min_button_size = egui::vec2(100.0, 40.0);
 
                     for (_, title) in tabs.iter() {
                         let text_size = ui.painter().layout_no_wrap(title.to_string(), font_id.clone(), style.visuals.text_color()).size();
@@ -71,8 +73,8 @@ impl eframe::App for App {
                     tabs_width += (tabs.len() - 1) as f32 * item_spacing;
 
                     let available_width = ui.available_width();
-                    let close_button_width = 30.0; // From add_sized
-                    let spacer_width = (available_width - tabs_width - close_button_width) / 2.0;
+                    let close_button_width = 40.0;
+                    let spacer_width = (available_width - tabs_width - close_button_width).max(0.0) / 2.0;
 
                     ui.add_space(spacer_width);
 
@@ -81,7 +83,7 @@ impl eframe::App for App {
                         let is_active = state.active_tab == *tab;
                         let button = egui::Button::new(*title)
                             .frame(false)
-                            .min_size(egui::vec2(100.0, 30.0));
+                            .min_size(min_button_size);
                         let response = ui.add(button);
 
                         if is_active {
@@ -99,7 +101,7 @@ impl eframe::App for App {
 
                     // Close button on the right
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add_sized([30.0, 30.0], egui::Button::new("❌")).clicked() {
+                        if ui.add_sized([40.0, 40.0], egui::Button::new("❌")).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });

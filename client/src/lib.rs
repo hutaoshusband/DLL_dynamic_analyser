@@ -393,7 +393,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 // Helper function to safely access and parse a specific module's PE file.
 fn with_pe_file<F, R>(source_name: &str, module_name: &str, closure: F) -> Option<R>
 where
-    F: FnOnce(PeFile) -> R,
+    F: FnOnce(PeFile, isize) -> R,
 {
     unsafe {
         let wide_module_name = U16CString::from_str(module_name).unwrap();
@@ -430,7 +430,7 @@ where
         let image_slice = std::slice::from_raw_parts(base as *const u8, image_size);
 
         match PeFile::from_bytes(image_slice) {
-            Ok(file) => Some(closure(file)),
+            Ok(file) => Some(closure(file, base)),
             Err(e) => {
                 log_event(LogLevel::Error, LogEvent::Error {
                     source: source_name.to_string(),
@@ -444,7 +444,7 @@ where
 
 fn handle_calculate_entropy(module_name: &str, section_name: &str) {
     debug_log(&format!("Handling CalculateEntropy for section: {} in module: {}", section_name, module_name));
-    with_pe_file("handle_calculate_entropy", module_name, |file| {
+    with_pe_file("handle_calculate_entropy", module_name, |file, _| {
         for section in file.section_headers() {
             if let Ok(name) = section.name() {
                 if name == section_name {
@@ -466,11 +466,18 @@ fn handle_calculate_entropy(module_name: &str, section_name: &str) {
 
 fn handle_dump_section(module_name: &str, section_name: &str) {
     debug_log(&format!("Handling DumpSection for section: {} in module: {}", section_name, module_name));
-    with_pe_file("handle_dump_section", module_name, |file| {
+    with_pe_file("handle_dump_section", module_name, |file, base| {
         for section in file.section_headers() {
             if let Ok(name) = section.name() {
                 if name == section_name {
-                    let data = file.get_section_bytes(section).unwrap_or(&[]);
+                    // The correct way to dump a section from memory is to use its virtual address
+                    // relative to the module's base address, not the file-based `get_section_bytes`.
+                    let section_start = (base as usize + section.VirtualAddress as usize) as *const u8;
+                    let section_size = section.VirtualSize as usize;
+                    let data = unsafe {
+                        std::slice::from_raw_parts(section_start, section_size)
+                    };
+
                     log_event(LogLevel::Info, LogEvent::SectionDump {
                         name: section_name.to_string(),
                         data: data.to_vec(),
@@ -484,7 +491,7 @@ fn handle_dump_section(module_name: &str, section_name: &str) {
 
 fn handle_list_sections(module_name: &str) {
     debug_log(&format!("Handling ListSections for module: {}", module_name));
-    with_pe_file("handle_list_sections", module_name, |file| {
+    with_pe_file("handle_list_sections", module_name, |file, _| {
         let sections = file
             .section_headers()
             .iter()
