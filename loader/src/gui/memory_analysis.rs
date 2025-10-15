@@ -45,16 +45,24 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
     ui.collapsing("Memory Sections", |ui| {
         if ui.button("Refresh Sections").clicked() {
             if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
-                let command = Command::ListSections;
-                if let Ok(command_json) = serde_json::to_string(&command) {
-                    unsafe {
-                        windows_sys::Win32::Storage::FileSystem::WriteFile(
-                            pipe_handle,
-                            command_json.as_ptr(),
-                            command_json.len() as u32,
-                            &mut 0,
-                            std::ptr::null_mut(),
-                        );
+                if let Some(module_index) = state.selected_module_index {
+                    let modules = state.modules.lock().unwrap();
+                    if let Some(module) = modules.get(module_index) {
+                        let command = Command::ListSections {
+                            module_name: module.name.clone(),
+                        };
+                        if let Ok(command_json) = serde_json::to_string(&command) {
+                            let command_to_send = format!("{}\n", command_json);
+                            unsafe {
+                                windows_sys::Win32::Storage::FileSystem::WriteFile(
+                                    pipe_handle,
+                                    command_to_send.as_ptr(),
+                                    command_to_send.len() as u32,
+                                    &mut 0,
+                                    std::ptr::null_mut(),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -79,17 +87,24 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                             "Address: {:#X}, Size: {} bytes",
                             section.virtual_address, section.virtual_size
                         ));
+                        let module_name = state.selected_module_index.and_then(|i| {
+                            let modules = state.modules.lock().unwrap();
+                            modules.get(i).map(|m| m.name.clone())
+                        }).unwrap_or_default();
+
                         if ui.button("Dump").clicked() {
                             if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
                                 let command = Command::DumpSection {
+                                    module_name: module_name.clone(),
                                     name: section.name.clone(),
                                 };
                                 if let Ok(command_json) = serde_json::to_string(&command) {
+                                    let command_to_send = format!("{}\n", command_json);
                                     unsafe {
                                         windows_sys::Win32::Storage::FileSystem::WriteFile(
                                             pipe_handle,
-                                            command_json.as_ptr(),
-                                            command_json.len() as u32,
+                                            command_to_send.as_ptr(),
+                                            command_to_send.len() as u32,
                                             &mut 0,
                                             std::ptr::null_mut(),
                                         );
@@ -100,14 +115,16 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                         if ui.button("Entropy Scan").clicked() {
                             if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
                                 let command = Command::CalculateEntropy {
+                                    module_name: module_name.clone(),
                                     name: section.name.clone(),
                                 };
                                 if let Ok(command_json) = serde_json::to_string(&command) {
+                                     let command_to_send = format!("{}\n", command_json);
                                     unsafe {
                                         windows_sys::Win32::Storage::FileSystem::WriteFile(
                                             pipe_handle,
-                                            command_json.as_ptr(),
-                                            command_json.len() as u32,
+                                            command_to_send.as_ptr(),
+                                            command_to_send.len() as u32,
                                             &mut 0,
                                             std::ptr::null_mut(),
                                         );

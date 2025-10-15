@@ -3,29 +3,45 @@ use eframe::egui::{self, Ui};
 use crate::app::state::AppState;
 use shared::logging::{LogEvent, LogLevel};
 
+use egui::{Align, Color32, Frame, Layout};
+
 pub fn render_log_tab(ui: &mut Ui, state: &mut AppState) {
-    egui::ScrollArea::vertical()
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for (log, count) in &state.logs {
-                let color = match log.level {
-                    LogLevel::Fatal | LogLevel::Error => egui::Color32::RED,
-                    LogLevel::Success => egui::Color32::GREEN,
-                    LogLevel::Warn => egui::Color32::from_rgb(255, 165, 0),
-                    LogLevel::Info => egui::Color32::YELLOW,
-                    _ => egui::Color32::LIGHT_BLUE,
-                };
-                let mut log_text = format!(
-                    "[{}] {}",
-                    log.timestamp.format("%H:%M:%S"),
-                    format_log_event(&log.event)
-                );
-                if *count > 1 {
-                    log_text = format!("({}x) {}", count, log_text);
-                }
-                ui.colored_label(color, log_text);
-            }
+    // Center the terminal-like view
+    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+        let terminal_frame = Frame::central_panel(&ui.style())
+            .fill(Color32::from_rgb(10, 10, 15)) // Darker, terminal-like background
+            .inner_margin(egui::Margin::same(10.0));
+
+        terminal_frame.show(ui, |ui| {
+            ui.set_max_width(ui.available_width() * 0.9); // Use 90% of available width
+            ui.set_max_height(ui.available_height() * 0.95); // Use 95% of available height
+
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (log, count) in &state.logs {
+                        let color = match log.level {
+                            LogLevel::Fatal | LogLevel::Error => Color32::from_rgb(243, 139, 168), // Red
+                            LogLevel::Success => Color32::from_rgb(166, 227, 161), // Green
+                            LogLevel::Warn => Color32::from_rgb(250, 179, 135),    // Orange
+                            LogLevel::Info => Color32::from_rgb(137, 180, 250),     // Blue
+                            LogLevel::Debug => Color32::from_rgb(198, 160, 246),    // Mauve
+                            LogLevel::Trace => Color32::from_rgb(127, 132, 156),    // Faint
+                        };
+                        let mut log_text = format!(
+                            "[{}] {}",
+                            log.timestamp.format("%H:%M:%S"),
+                            format_log_event(&log.event)
+                        );
+                        if *count > 1 {
+                            log_text = format!("({}x) {}", count, log_text);
+                        }
+                        ui.colored_label(color, log_text);
+                    }
+                });
         });
+    });
 }
 
 fn format_log_event(event: &LogEvent) -> String {
