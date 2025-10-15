@@ -13,7 +13,8 @@ fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 700.0])
             .with_resizable(true)
-            .with_transparent(true),
+            .with_transparent(true)
+            .with_decorations(false),
         ..Default::default()
     };
 
