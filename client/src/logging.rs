@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 #![allow(dead_code, unused_variables)]
 use crate::config::CONFIG;
 use crate::SUSPICION_SCORE;

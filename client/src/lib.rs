@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 #![recursion_limit = "1024"]
 #![cfg(windows)]
 #![allow(dead_code, unused_variables)]
@@ -592,6 +596,7 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
 
 use shared::MonitorConfig;
 fn initialize_features(config: MonitorConfig) {
+    log_event(LogLevel::Info, LogEvent::Initialization { status: "HUTAOSHUSBAND's Advanced Analysis Framework enabled.".to_string() });
     log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", config) });
 
     let addr = &CONFIG.termination_allowed as *const _ as usize;

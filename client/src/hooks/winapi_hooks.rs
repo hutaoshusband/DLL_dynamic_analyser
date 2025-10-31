@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 use shared::logging::{LogLevel, LogEvent};
 use crate::config::CONFIG;
 use crate::logging::capture_stack_trace;

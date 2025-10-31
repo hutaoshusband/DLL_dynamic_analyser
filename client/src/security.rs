@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 #![allow(dead_code, unused_variables)]
 use std::mem::zeroed;
 use windows_sys::Win32::Foundation::LocalFree;

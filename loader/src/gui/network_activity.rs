@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 use eframe::egui::{self, Color32, Ui};
 use shared::logging::{LogEntry, LogEvent, LogLevel};
 

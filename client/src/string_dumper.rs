@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 // This module is responsible for periodically scanning the process's memory
 // for strings, which can reveal interesting information about a program's
 // behavior, such as hidden commands, URLs, or configuration data.

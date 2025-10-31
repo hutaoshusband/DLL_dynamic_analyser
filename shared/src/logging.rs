@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

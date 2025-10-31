@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 // monitor_lib/src/vmp_dumper.rs
 #![allow(dead_code, unused_variables)]
 

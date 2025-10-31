@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 use std::{mem, path::Path};
 use widestring::{U16CString, U16String};
 use windows_sys::Win32::{

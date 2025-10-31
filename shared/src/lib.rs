@@ -1,9 +1,13 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 pub mod logging;
 
 use serde::{Deserialize, Serialize};
 
-pub const COMMANDS_PIPE_NAME: &str = r"\\.\pipe\cs2_monitor_commands_pipe";
-pub const LOGS_PIPE_NAME: &str = r"\\.\pipe\cs2_monitor_logs_pipe";
+pub const COMMANDS_PIPE_NAME: &str = r"\\.\pipe\hutaoshusband_monitor_commands_pipe";
+pub const LOGS_PIPE_NAME: &str = r"\\.\pipe\hutaoshusband_monitor_logs_pipe";
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {

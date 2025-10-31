@@ -1,3 +1,7 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
+// All rights reserved.
+
+
 /// Iterates through all loaded modules and triggers an IAT scan for each.
 #[allow(dead_code)]
 pub unsafe fn scan_iat_modifications() {
