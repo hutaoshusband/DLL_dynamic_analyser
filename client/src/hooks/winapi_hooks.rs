@@ -555,126 +555,50 @@ pub unsafe fn hooked_write_file(
 }
 
 pub fn hooked_exit_process(u_exit_code: u32) -> ! {
-    // Check if termination is allowed by the controlling process.
-    if CONFIG
-        .termination_allowed
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        // If allowed, log it and call the original function.
-        log_event(
-            LogLevel::Warn,
-            LogEvent::ApiHook {
-                function_name: "ExitProcess".to_string(),
-                parameters: json!({
-                    "exit_code": u_exit_code,
-                    "action": "Termination was allowed by the analyzer."
-                }),
-                stack_trace: None,
-            },
-        );
-        unsafe { ExitProcessHook.call(u_exit_code) };
-    }
-
-    // If not allowed, block termination.
-    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
-    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
-    SUSPICION_SCORE.fetch_add(10, Ordering::Relaxed);
-    let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
     log_event(
-        LogLevel::Fatal,
+        LogLevel::Info,
         LogEvent::ApiHook {
             function_name: "ExitProcess".to_string(),
             parameters: json!({
                 "exit_code": u_exit_code,
-                "action": "Termination blocked. The process will hang instead of exiting."
+                "action": "Process exiting."
             }),
-            stack_trace,
+            stack_trace: None,
         },
     );
-
-    // This function must not return to properly emulate ExitProcess.
-    // We loop indefinitely to prevent the process from exiting.
-    loop {
-        thread::sleep(std::time::Duration::from_secs(3600));
-    }
+    unsafe { ExitProcessHook.call(u_exit_code) };
 }
 
 pub fn hooked_terminate_process(h_process: HANDLE, u_exit_code: u32) -> BOOL {
-    // Check if termination is allowed by the controlling process.
-    if CONFIG
-        .termination_allowed
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        log_event(
-            LogLevel::Warn,
-            LogEvent::ApiHook {
-                function_name: "TerminateProcess".to_string(),
-                parameters: json!({
-                    "process_handle": format!("{:?}", h_process),
-                    "exit_code": u_exit_code,
-                    "action": "Termination was allowed by the analyzer."
-                }),
-                stack_trace: None,
-            },
-        );
-        return unsafe { TerminateProcessHook.call(h_process, u_exit_code) };
-    }
-
-    // If not allowed, block termination.
-    let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
     log_event(
-        LogLevel::Fatal,
+        LogLevel::Info,
         LogEvent::ApiHook {
             function_name: "TerminateProcess".to_string(),
             parameters: json!({
                 "process_handle": format!("{:?}", h_process),
                 "exit_code": u_exit_code,
-                "action": "Termination blocked. Returning FALSE."
+                "action": "Process termination requested."
             }),
-            stack_trace,
+            stack_trace: None,
         },
     );
-
-    0 // Return FALSE to indicate that termination failed.
+    unsafe { TerminateProcessHook.call(h_process, u_exit_code) }
 }
 
 pub fn hooked_nt_terminate_process(h_process: HANDLE, exit_status: u32) -> i32 {
-    // Check if termination is allowed by the controlling process.
-    if CONFIG
-        .termination_allowed
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        log_event(
-            LogLevel::Warn,
-            LogEvent::ApiHook {
-                function_name: "NtTerminateProcess".to_string(),
-                parameters: json!({
-                    "process_handle": format!("{:?}", h_process),
-                    "exit_status": exit_status,
-                    "action": "Termination was allowed by the analyzer."
-                }),
-                stack_trace: None,
-            },
-        );
-        return unsafe { NtTerminateProcessHook.call(h_process, exit_status) };
-    }
-
-    // If not allowed, block termination.
-    let stack_trace = Some(capture_stack_trace(CONFIG.stack_trace_frame_limit));
     log_event(
-        LogLevel::Fatal,
+        LogLevel::Info,
         LogEvent::ApiHook {
             function_name: "NtTerminateProcess".to_string(),
             parameters: json!({
                 "process_handle": format!("{:?}", h_process),
                 "exit_status": exit_status,
-                "action": "Termination blocked. Returning STATUS_ACCESS_DENIED."
+                "action": "Process termination requested."
             }),
-            stack_trace,
+            stack_trace: None,
         },
     );
-
-    0xC0000022u32 as i32 // STATUS_ACCESS_DENIED
+    unsafe { NtTerminateProcessHook.call(h_process, exit_status) }
 }
 
 pub fn hooked_http_send_request_w(
