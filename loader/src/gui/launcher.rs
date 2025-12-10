@@ -79,6 +79,7 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                                 state.logs_pipe_handle.clone(),
                                 state.is_process_running.clone(),
                                 state.injection_status.clone(),
+                                state.use_manual_map,
                             );
                             state.active_tab = ActiveTab::Logs;
                         }
@@ -91,6 +92,8 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                     if ui.checkbox(&mut auto_inject_enabled, "Auto-Inject").clicked() {
                         auto_inject_clicked = true;
                     }
+
+                    ui.checkbox(&mut state.use_manual_map, "Use Manual Map (Broken for now 11/12/2025)");
                 });
             });
         });

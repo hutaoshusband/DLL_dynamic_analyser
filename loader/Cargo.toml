@@ -17,3 +17,4 @@ chrono = { version = "0.4", features = ["serde"] }
 widestring = { workspace = true }
 egui_plot = "0.27.2"
 shared = { path = "../shared" }
+pelite = "0.10.0"

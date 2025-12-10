@@ -37,6 +37,9 @@ use widestring::U16CString;
 use windows_sys::Win32::Foundation::{
     CloseHandle, BOOL, GetLastError, HINSTANCE, INVALID_HANDLE_VALUE, ERROR_MORE_DATA,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    AddVectoredExceptionHandler, EXCEPTION_RECORD, CONTEXT,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
     PIPE_TYPE_MESSAGE, PIPE_WAIT,
@@ -596,6 +599,7 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
 
 use shared::MonitorConfig;
 fn initialize_features(config: MonitorConfig) {
+    debug_log("initialize_features() called");
     log_event(LogLevel::Info, LogEvent::Initialization { status: "HUTAOSHUSBAND's Advanced Analysis Framework enabled.".to_string() });
     log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", config) });
 
@@ -603,23 +607,34 @@ fn initialize_features(config: MonitorConfig) {
     log_event(LogLevel::Debug, LogEvent::Initialization { status: format!("TERMINATION_FLAG_ADDR:{}", addr) });
 
     if config.api_hooks_enabled {
+        debug_log("API hooks enabled - initializing WinAPI hooks...");
         unsafe {
             winapi_hooks::initialize_all_hooks();
         }
+        debug_log("WinAPI hooks initialized successfully");
+        
+        debug_log("Spawning CPP REST hook thread...");
         thread::spawn(cpprest_hook::initialize_and_enable_hook);
+        debug_log("CPP REST hook thread spawned");
+    } else {
+        debug_log("API hooks disabled in config");
     }
 
     let mut scanner_threads = Vec::new();
     if config.vmp_dump_enabled {
+        debug_log("VMP dump enabled - starting VMP monitoring...");
         scanner_threads.push(thread::spawn(vmp_dumper::start_vmp_monitoring));
     }
     if config.string_dump_enabled {
+        debug_log("String dump enabled - starting string dumper...");
         scanner_threads.push(thread::spawn(string_dumper::start_string_dumper));
     }
     if config.iat_scan_enabled || config.manual_map_scan_enabled {
+        debug_log("IAT or manual map scan enabled - starting scanner thread...");
         let iat_enabled = config.iat_scan_enabled;
         let manual_map_enabled = config.manual_map_scan_enabled;
         let scanner_handle = thread::spawn(move || {
+            debug_log("Scanner thread started");
             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
                 if iat_enabled {
                     // This was disabled due to causing stability issues and log spam.
@@ -634,54 +649,222 @@ fn initialize_features(config: MonitorConfig) {
                 }
                 thread::sleep(Duration::from_secs(5));
             }
+            debug_log("Scanner thread exiting");
         });
         scanner_threads.push(scanner_handle);
     }
 
     if !scanner_threads.is_empty() {
+        debug_log(&format!("Registering {} scanner threads", scanner_threads.len()));
         THREAD_HANDLES.lock().unwrap().extend(scanner_threads);
     }
+    
+    debug_log("Feature initialization complete");
     log_event(LogLevel::Info, LogEvent::Initialization { status: "Feature initialization complete.".to_string() });
+}
+
+// EXCEPTION_CONTINUE_SEARCH constant (not exported by windows-sys)
+const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+
+/// Vectored Exception Handler to catch and log all crashes/exceptions
+unsafe extern "system" fn exception_handler(exception_info: *mut c_void) -> i32 {
+    if exception_info.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Cast to pointers - exception_info points to a structure with two pointers
+    let exception_record_ptr = *(exception_info as *const *mut EXCEPTION_RECORD);
+    let context_record_ptr = *(exception_info.add(std::mem::size_of::<usize>()) as *const *mut CONTEXT);
+    
+    if exception_record_ptr.is_null() {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    let exception_record = &*exception_record_ptr;
+    let exception_code = (*exception_record).ExceptionCode;
+    let exception_address = (*exception_record).ExceptionAddress;
+    let exception_flags = (*exception_record).ExceptionFlags;
+
+    // Get exception code name (cast to u32 to avoid overflow issues with NTSTATUS codes)
+    let exception_code_u32 = exception_code as u32;
+    let exception_name = match exception_code_u32 {
+        0xC0000005 => "ACCESS_VIOLATION",
+        0xC000001D => "ILLEGAL_INSTRUCTION",
+        0xC0000094 => "INTEGER_DIVIDE_BY_ZERO",
+        0xC0000095 => "INTEGER_OVERFLOW",
+        0xC0000096 => "PRIVILEGED_INSTRUCTION",
+        0xC00000FD => "STACK_OVERFLOW",
+        0xC000008C => "ARRAY_BOUNDS_EXCEEDED",
+        0xC000008D => "FLOAT_DENORMAL_OPERAND",
+        0xC000008E => "FLOAT_DIVIDE_BY_ZERO",
+        0xC000008F => "FLOAT_INEXACT_RESULT",
+        0xC0000090 => "FLOAT_INVALID_OPERATION",
+        0xC0000091 => "FLOAT_OVERFLOW",
+        0xC0000092 => "FLOAT_STACK_CHECK",
+        0xC0000093 => "FLOAT_UNDERFLOW",
+        0x80000003 => "BREAKPOINT",
+        0x80000004 => "SINGLE_STEP",
+        _ => "UNKNOWN_EXCEPTION",
+    };
+
+    // Log to debug file immediately
+    let pid = GetCurrentProcessId();
+    let log_path = std::env::temp_dir().join(format!("monitor_lib_debug_{}.log", pid));
+    
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let _ = writeln!(file, "\n========== EXCEPTION CAUGHT ==========");
+        let _ = writeln!(file, "[{}] Exception Code: 0x{:08X} ({})", timestamp, exception_code, exception_name);
+        let _ = writeln!(file, "[{}] Exception Address: {:?}", timestamp, exception_address);
+        let _ = writeln!(file, "[{}] Exception Flags: 0x{:08X}", timestamp, exception_flags);
+        
+        // Log context if available
+        if !context_record_ptr.is_null() {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let ctx = &*context_record_ptr;
+                let _ = writeln!(file, "[{}] RIP: 0x{:016X}", timestamp, ctx.Rip);
+                let _ = writeln!(file, "[{}] RSP: 0x{:016X}", timestamp, ctx.Rsp);
+                let _ = writeln!(file, "[{}] RBP: 0x{:016X}", timestamp, ctx.Rbp);
+                let _ = writeln!(file, "[{}] RAX: 0x{:016X}", timestamp, ctx.Rax);
+                let _ = writeln!(file, "[{}] RBX: 0x{:016X}", timestamp, ctx.Rbx);
+                let _ = writeln!(file, "[{}] RCX: 0x{:016X}", timestamp, ctx.Rcx);
+                let _ = writeln!(file, "[{}] RDX: 0x{:016X}", timestamp, ctx.Rdx);
+            }
+        }
+        
+        // Try to get additional info for access violations
+        if exception_code_u32 == 0xC0000005 && (*exception_record).NumberParameters >= 2 {
+            let access_type = (*exception_record).ExceptionInformation[0];
+            let access_address = (*exception_record).ExceptionInformation[1];
+            let access_str = match access_type {
+                0 => "READ",
+                1 => "WRITE",
+                8 => "DEP_VIOLATION",
+                _ => "UNKNOWN",
+            };
+            let _ = writeln!(file, "[{}] Access Violation Type: {} at address 0x{:016X}", timestamp, access_str, access_address);
+        }
+        
+        let _ = writeln!(file, "======================================\n");
+        let _ = file.flush();
+    }
+
+    // Also try to log via the normal logging system if it's initialized
+    if let Some(sender) = LOG_SENDER.get() {
+        let entry = create_log_entry(
+            LogLevel::Error,
+            LogEvent::Error {
+                source: "VectoredExceptionHandler".to_string(),
+                message: format!(
+                    "CRASH DETECTED: {} (0x{:08X}) at address {:?}",
+                    exception_name, exception_code, exception_address
+                ),
+            },
+        );
+        let _ = sender.try_send(Some(entry));
+    }
+
+    // Continue searching for other handlers
+    EXCEPTION_CONTINUE_SEARCH
 }
 
 
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserved: *mut c_void) -> BOOL {
-    match call_reason {
-        DLL_PROCESS_ATTACH => {
-            debug_log("DllMain called with DLL_PROCESS_ATTACH.");
-            // Using a separate thread for initialization is crucial to avoid deadlocks
-            // inside DllMain, which is a highly restricted environment.
-            let init_thread = thread::spawn(main_initialization_thread);
-            THREAD_HANDLES.lock().unwrap().push(init_thread);
-            debug_log("Initialization thread spawned from DllMain.");
+    // 1. Raw WinAPI Beacon to verify code execution reaches here.
+    unsafe {
+        use windows_sys::Win32::Storage::FileSystem::{CreateFileA, WriteFile, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ};
+        use windows_sys::Win32::Foundation::GENERIC_WRITE;
+        
+        // Use a hardcoded path in TEMP for the beacon to avoid complex logic
+        // We can't easily get env var in no_std/raw mode, but we can assume C:\Windows\Temp or similar?
+        // Let's just try the current working directory or C:\Users\Public which is usually writable.
+        // Actually, let's use the PID in the filename to be distinct.
+        let pid = GetCurrentProcessId();
+        let name = format!("C:\\Users\\Public\\analyzer_beacon_{}.txt\0", pid);
+        let handle = CreateFileA(
+            name.as_ptr(), 
+            GENERIC_WRITE, 
+            FILE_SHARE_READ, 
+            std::ptr::null(), 
+            OPEN_ALWAYS, 
+            FILE_ATTRIBUTE_NORMAL, 
+            0
+        );
+        
+        if handle != INVALID_HANDLE_VALUE {
+            let msg = "DllMain Reached!\n";
+            WriteFile(handle, msg.as_ptr(), msg.len() as u32, std::ptr::null_mut(), std::ptr::null_mut());
+            CloseHandle(handle);
         }
-        DLL_PROCESS_DETACH => {
-            debug_log("DllMain called with DLL_PROCESS_DETACH.");
-            SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-
-            // Signal the logging thread to shut down.
-            if let Some(sender) = LOG_SENDER.get() {
-                let _ = sender.send(None);
-            }
-
-            // Spawn a dedicated thread to handle the cleanup.
-            // This avoids blocking DllMain while waiting for threads to join.
-            thread::spawn(|| {
-                debug_log("Shutdown thread started.");
-                let mut handles = THREAD_HANDLES.lock().unwrap();
-                // Drain the vector and join each handle. This will block the shutdown
-                // thread (but not DllMain) until the background threads have exited.
-                for handle in handles.drain(..) {
-                    let _ = handle.join();
-                }
-                debug_log("All background threads have been joined.");
-            });
-
-            debug_log("Shutdown process initiated from DllMain.");
-        }
-        _ => {}
     }
-    1 // Return TRUE to indicate success.
+
+    let result = std::panic::catch_unwind(|| {
+        match call_reason {
+            DLL_PROCESS_ATTACH => {
+                debug_log("DllMain called with DLL_PROCESS_ATTACH.");
+                
+                // Install vectored exception handler FIRST to catch any crashes
+                unsafe {
+                    let handler = AddVectoredExceptionHandler(
+                        1, 
+                        Some(std::mem::transmute(exception_handler as *const ()))
+                    );
+                    if handler.is_null() {
+                        debug_log("WARNING: Failed to install vectored exception handler!");
+                    } else {
+                        debug_log("Vectored exception handler installed successfully.");
+                    }
+                }
+                
+                // Using a separate thread for initialization is crucial to avoid deadlocks
+                // inside DllMain, which is a highly restricted environment.
+                let init_thread = thread::spawn(main_initialization_thread);
+                THREAD_HANDLES.lock().unwrap().push(init_thread);
+                debug_log("Initialization thread spawned from DllMain.");
+            }
+            DLL_PROCESS_DETACH => {
+                debug_log("DllMain called with DLL_PROCESS_DETACH.");
+                SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
+    
+                // Signal the logging thread to shut down.
+                if let Some(sender) = LOG_SENDER.get() {
+                    let _ = sender.send(None);
+                }
+    
+                // Spawn a dedicated thread to handle the cleanup.
+                // This avoids blocking DllMain while waiting for threads to join.
+                thread::spawn(|| {
+                    debug_log("Shutdown thread started.");
+                    let mut handles = THREAD_HANDLES.lock().unwrap();
+                    // Drain the vector and join each handle. This will block the shutdown
+                    // thread (but not DllMain) until the background threads have exited.
+                    for handle in handles.drain(..) {
+                        let _ = handle.join();
+                    }
+                    debug_log("All background threads have been joined.");
+                });
+    
+                debug_log("Shutdown process initiated from DllMain.");
+            }
+            _ => {}
+        }
+    });
+
+    match result {
+        Ok(_) => 1,
+        Err(_) => {
+            // Panic caught!
+            unsafe {
+                // Try logging the panic if possible, or just fail safely.
+                 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
+                 let msg = "PANIC IN DLLMAIN!\0";
+                 OutputDebugStringA(msg.as_ptr());
+            }
+            // If we panic in ATTACH, we should probably return FALSE to fail the load safely.
+            0
+        }
+    }
 }

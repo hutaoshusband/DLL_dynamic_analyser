@@ -14,7 +14,6 @@ use serde_json::json;
 use std::ffi::c_void;
 use std::slice;
 use std::sync::Mutex;
-use std::thread;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use widestring::U16CStr;
@@ -35,7 +34,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, CheckRemoteDebuggerPresent, IsDebuggerPresent,
-    PVECTORED_EXCEPTION_HANDLER, WriteProcessMemory, OutputDebugStringA, SetThreadContext,
+    PVECTORED_EXCEPTION_HANDLER, OutputDebugStringA,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -44,7 +43,7 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LoadLibraryExW, LoadLibraryW,
 };
-use windows_sys::Win32::System::Memory::VirtualAllocEx;
+// use windows_sys::Win32::System::Memory::VirtualAllocEx;
 use windows_sys::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW, HKEY, RegOpenKeyExW, RegQueryValueExW, RegEnumKeyExW, RegEnumValueW
 };
@@ -256,8 +255,15 @@ pub fn hooked_is_debugger_present() -> BOOL {
         }
     }
 
-    // Always return FALSE to hide the debugger.
-    0
+    // notice by HUTAOSHUSBAND on 2025-12-10
+    // For safety/integrity, we now default to monitoring only.
+    // Lying about debugger presence can break application logic or cause integrity checks to fail.
+    let result = unsafe { IsDebuggerPresentHook.call() };
+    
+    // Optional: If you strictly want to hide the debugger, you could return 0.
+    // But for analysis safety, we pass the real value.
+    // return 0; 
+    result
 }
 
 pub unsafe fn hooked_check_remote_debugger_present(
@@ -279,12 +285,8 @@ pub unsafe fn hooked_check_remote_debugger_present(
         );
     }
 
-    // Lie about the debugger's presence.
-    if !pb_is_debugger_present.is_null() {
-        *pb_is_debugger_present = 0; // FALSE
-    }
-
-    1 // TRUE (success)
+    // Safe Mode: Call original verify logic instead of lying.
+    CheckRemoteDebuggerPresentHook.call(h_process, pb_is_debugger_present)
 }
 
 pub unsafe fn hooked_nt_query_information_process(
@@ -311,14 +313,8 @@ pub unsafe fn hooked_nt_query_information_process(
                 },
             );
         }
-        // Lie by indicating that there is no debug port.
-        if process_information_length as usize >= std::mem::size_of::<HANDLE>() {
-            *(process_information as *mut HANDLE) = 0; // NULL handle
-            if !return_length.is_null() {
-                *return_length = std::mem::size_of::<HANDLE>() as u32;
-            }
-            return 0; // STATUS_SUCCESS
-        }
+        // Safe Mode: We log the check but do not interfere with the return value.
+        // Lying here often breaks the target's internal logic or injection chains.
     }
 
     NtQueryInformationProcessHook.call(
@@ -1950,7 +1946,8 @@ pub unsafe fn initialize_all_hooks() {
         hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
     }
 
-    // Hook process interaction functions
+    // Hook process interaction functions - DISABLED FOR STABILITY
+    /*
     if config.hook_open_process {
         hook!(OpenProcessHook, OpenProcess, |a, b, c| {
             hooked_open_process(a, b, c)
@@ -1970,6 +1967,7 @@ pub unsafe fn initialize_all_hooks() {
             |a, b, c, d, e| hooked_virtual_alloc_ex(a, b, c, d, e)
         );
     }
+    */
 
     // Hook library loading functions.
     if config.hook_load_library_w {
@@ -2037,9 +2035,11 @@ pub unsafe fn initialize_all_hooks() {
     if config.hook_queue_user_apc {
         hook!(QueueUserAPCHook, QueueUserAPC, |a, b, c| hooked_queue_user_apc(a, b, c));
     }
+    /*
     if config.hook_set_thread_context {
-        hook!(SetThreadContextHook, SetThreadContext, |a, b| hooked_set_thread_context(a, b));
+        hook!(SetThreadContextHook, SetThreadContext, |a, b, c| hooked_set_thread_context(a, b, c));
     }
+    */
     if config.hook_win_exec {
         hook!(WinExecHook, WinExec, |a, b| hooked_win_exec(a, b));
     }
@@ -2183,9 +2183,11 @@ unsafe fn initialize_dynamic_hooks() {
         }
     }
 
+    /*
     if config.hook_nt_create_thread_ex {
         dyn_hook!(NtCreateThreadExHook, "ntdll.dll", b"NtCreateThreadEx\0", |a, b, c, d, e, f, g, h, i, j, k| hooked_nt_create_thread_ex(a, b, c, d, e, f, g, h, i, j, k));
     }
+    */
     if config.hook_system {
         dyn_hook!(SystemHook, "msvcrt.dll", b"system\0", |a| hooked_system(a));
     }

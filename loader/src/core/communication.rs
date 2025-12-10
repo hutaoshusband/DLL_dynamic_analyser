@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 use windows_sys::Win32::{
-    Foundation::{GetLastError, INVALID_HANDLE_VALUE, ERROR_PIPE_BUSY},
+    Foundation::{GetLastError, INVALID_HANDLE_VALUE, ERROR_PIPE_BUSY, ERROR_FILE_NOT_FOUND},
     Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, FILE_GENERIC_READ,
         FILE_GENERIC_WRITE,
@@ -72,9 +72,10 @@ fn connect_to_pipe(
     pipe_name: &str,
     access: u32,
     status_arc: &Arc<Mutex<String>>,
+    logger: &Sender<String>,
 ) -> Option<isize> {
     let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
-    const MAX_RETRIES: u32 = 10;
+    const MAX_RETRIES: u32 = 60; // Increased to 30 seconds
     const RETRY_DELAY_MS: u64 = 500;
 
     for i in 0..MAX_RETRIES {
@@ -91,27 +92,37 @@ fn connect_to_pipe(
         };
 
         if pipe_handle != INVALID_HANDLE_VALUE {
-            *status_arc.lock().unwrap() = format!("Successfully connected to {}.", pipe_name);
+            let msg = format!("Successfully connected to {}.", pipe_name);
+            *status_arc.lock().unwrap() = msg.clone();
+            let _ = logger.send(msg);
             return Some(pipe_handle);
         }
 
         let err = unsafe { GetLastError() };
-        if err != ERROR_PIPE_BUSY {
-            *status_arc.lock().unwrap() =
-                format!("Failed to connect to {}. Error: {}", pipe_name, err);
+        if err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND {
+            let msg = format!("Failed to connect to {}. Error: {}", pipe_name, err);
+            *status_arc.lock().unwrap() = msg.clone();
+            let _ = logger.send(msg);
             return None;
         }
 
-        *status_arc.lock().unwrap() = format!(
-            "Pipe {} is busy, retrying... ({}/{})",
+        let msg = format!(
+            "Pipe {} is busy or not ready, retrying... ({}/{})",
             pipe_name,
             i + 1,
             MAX_RETRIES
         );
+        *status_arc.lock().unwrap() = msg.clone();
+        // We might not want to spam the main log with retries, but if it fails eventually, the final error is logged.
+        // Uncomment below if detailed retry logs are desired in the GUI.
+        // let _ = logger.send(msg);
+
         thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
     }
 
-    *status_arc.lock().unwrap() = format!("Failed to connect to {} after all retries.", pipe_name);
+    let msg = format!("Failed to connect to {} after all retries.", pipe_name);
+    *status_arc.lock().unwrap() = msg.clone();
+    let _ = logger.send(msg);
     None
 }
 
@@ -125,12 +136,12 @@ pub fn connect_and_send_config(
 ) -> bool {
     // Connect to the two separate pipes.
     let commands_pipe_handle =
-        match connect_to_pipe(COMMANDS_PIPE_NAME, FILE_GENERIC_WRITE, &status_arc) {
+        match connect_to_pipe(COMMANDS_PIPE_NAME, FILE_GENERIC_WRITE, &status_arc, &logger) {
             Some(handle) => handle,
             None => return false,
         };
 
-    let logs_pipe_handle = match connect_to_pipe(LOGS_PIPE_NAME, FILE_GENERIC_READ, &status_arc) {
+    let logs_pipe_handle = match connect_to_pipe(LOGS_PIPE_NAME, FILE_GENERIC_READ, &status_arc, &logger) {
         Some(handle) => handle,
         None => {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(commands_pipe_handle) };

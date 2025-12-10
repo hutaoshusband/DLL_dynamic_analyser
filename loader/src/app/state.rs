@@ -54,6 +54,7 @@ pub struct AppState {
     pub active_tab: ActiveTab,
     pub auto_inject_enabled: Arc<AtomicBool>,
     pub auto_inject_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+    pub use_manual_map: bool,
 }
 
 impl AppState {
@@ -95,6 +96,7 @@ impl AppState {
             active_tab: ActiveTab::Launcher,
             auto_inject_enabled: Arc::new(AtomicBool::new(false)),
             auto_inject_thread: Arc::new(Mutex::new(None)),
+            use_manual_map: false,
         }
     }
 

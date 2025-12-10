@@ -33,7 +33,7 @@ fn main() -> Result<(), eframe::Error> {
 }
 
 fn create_custom_style() -> Style {
-    let background = Color32::from_rgba_unmultiplied(30, 30, 46, 180); // Lower alpha for more transparency
+    let _background = Color32::from_rgba_unmultiplied(30, 30, 46, 180); // Lower alpha for more transparency
     let panel_fill = Color32::from_rgba_unmultiplied(24, 24, 37, 190); // Lower alpha
     let accent_blue = Color32::from_rgb(137, 180, 250);
     let text_color = Color32::from_rgb(205, 214, 244);

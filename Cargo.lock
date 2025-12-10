@@ -2069,6 +2069,7 @@ dependencies = [
  "egui",
  "egui_plot",
  "embed-resource",
+ "pelite",
  "rfd",
  "serde",
  "serde_json",

@@ -48,6 +48,7 @@ pub fn start_auto_inject_thread(state: &mut AppState) {
                         logs_pipe_handle.clone(),
                         is_process_running.clone(),
                         injection_status.clone(),
+                        false, // Auto-inject doesn't support manual map yet or defaults to false
                     );
                 }
             }
@@ -70,6 +71,7 @@ pub fn start_analysis_thread(
     logs_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
+    use_manual_map: bool,
 ) {
     let dll_path_owned = dll_path.to_owned();
     thread::spawn(move || {
@@ -85,6 +87,7 @@ pub fn start_analysis_thread(
             logs_pipe_arc,
             running_arc,
             status_arc,
+            use_manual_map,
         );
     });
 }
@@ -101,6 +104,7 @@ fn run_analysis(
     logs_pipe_arc: Arc<Mutex<Option<isize>>>,
     running_arc: Arc<AtomicBool>,
     status_arc: Arc<Mutex<String>>,
+    use_manual_map: bool,
 ) {
     running_arc.store(true, Ordering::SeqCst);
 
@@ -122,7 +126,15 @@ fn run_analysis(
     *pid_arc.lock().unwrap() = Some(pid);
     *status_arc.lock().unwrap() = format!("Injecting into PID {}...", pid);
 
-    match injection::inject_dll(pid, dll_path) {
+    *status_arc.lock().unwrap() = format!("Injecting into PID {}...", pid);
+
+    let injection_result = if use_manual_map {
+        injection::manual_map_inject(pid, dll_path)
+    } else {
+        injection::inject_dll(pid, dll_path)
+    };
+
+    match injection_result {
         Ok(handle) => {
             *handle_arc.lock().unwrap() = Some(handle);
             thread::sleep(Duration::from_millis(500)); // Wait for DLL to initialize
