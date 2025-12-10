@@ -648,40 +648,84 @@ fn initialize_features(config: MonitorConfig) {
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserved: *mut c_void) -> BOOL {
-    match call_reason {
-        DLL_PROCESS_ATTACH => {
-            debug_log("DllMain called with DLL_PROCESS_ATTACH.");
-            // Using a separate thread for initialization is crucial to avoid deadlocks
-            // inside DllMain, which is a highly restricted environment.
-            let init_thread = thread::spawn(main_initialization_thread);
-            THREAD_HANDLES.lock().unwrap().push(init_thread);
-            debug_log("Initialization thread spawned from DllMain.");
+    // 1. Raw WinAPI Beacon to verify code execution reaches here.
+    unsafe {
+        use windows_sys::Win32::Storage::FileSystem::{CreateFileA, WriteFile, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ};
+        use windows_sys::Win32::Foundation::GENERIC_WRITE;
+        
+        // Use a hardcoded path in TEMP for the beacon to avoid complex logic
+        // We can't easily get env var in no_std/raw mode, but we can assume C:\Windows\Temp or similar?
+        // Let's just try the current working directory or C:\Users\Public which is usually writable.
+        // Actually, let's use the PID in the filename to be distinct.
+        let pid = GetCurrentProcessId();
+        let name = format!("C:\\Users\\Public\\analyzer_beacon_{}.txt\0", pid);
+        let handle = CreateFileA(
+            name.as_ptr(), 
+            GENERIC_WRITE, 
+            FILE_SHARE_READ, 
+            std::ptr::null(), 
+            OPEN_ALWAYS, 
+            FILE_ATTRIBUTE_NORMAL, 
+            0
+        );
+        
+        if handle != INVALID_HANDLE_VALUE {
+            let msg = "DllMain Reached!\n";
+            WriteFile(handle, msg.as_ptr(), msg.len() as u32, std::ptr::null_mut(), std::ptr::null_mut());
+            CloseHandle(handle);
         }
-        DLL_PROCESS_DETACH => {
-            debug_log("DllMain called with DLL_PROCESS_DETACH.");
-            SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-
-            // Signal the logging thread to shut down.
-            if let Some(sender) = LOG_SENDER.get() {
-                let _ = sender.send(None);
-            }
-
-            // Spawn a dedicated thread to handle the cleanup.
-            // This avoids blocking DllMain while waiting for threads to join.
-            thread::spawn(|| {
-                debug_log("Shutdown thread started.");
-                let mut handles = THREAD_HANDLES.lock().unwrap();
-                // Drain the vector and join each handle. This will block the shutdown
-                // thread (but not DllMain) until the background threads have exited.
-                for handle in handles.drain(..) {
-                    let _ = handle.join();
-                }
-                debug_log("All background threads have been joined.");
-            });
-
-            debug_log("Shutdown process initiated from DllMain.");
-        }
-        _ => {}
     }
-    1 // Return TRUE to indicate success.
+
+    let result = std::panic::catch_unwind(|| {
+        match call_reason {
+            DLL_PROCESS_ATTACH => {
+                debug_log("DllMain called with DLL_PROCESS_ATTACH.");
+                // Using a separate thread for initialization is crucial to avoid deadlocks
+                // inside DllMain, which is a highly restricted environment.
+                let init_thread = thread::spawn(main_initialization_thread);
+                THREAD_HANDLES.lock().unwrap().push(init_thread);
+                debug_log("Initialization thread spawned from DllMain.");
+            }
+            DLL_PROCESS_DETACH => {
+                debug_log("DllMain called with DLL_PROCESS_DETACH.");
+                SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
+    
+                // Signal the logging thread to shut down.
+                if let Some(sender) = LOG_SENDER.get() {
+                    let _ = sender.send(None);
+                }
+    
+                // Spawn a dedicated thread to handle the cleanup.
+                // This avoids blocking DllMain while waiting for threads to join.
+                thread::spawn(|| {
+                    debug_log("Shutdown thread started.");
+                    let mut handles = THREAD_HANDLES.lock().unwrap();
+                    // Drain the vector and join each handle. This will block the shutdown
+                    // thread (but not DllMain) until the background threads have exited.
+                    for handle in handles.drain(..) {
+                        let _ = handle.join();
+                    }
+                    debug_log("All background threads have been joined.");
+                });
+    
+                debug_log("Shutdown process initiated from DllMain.");
+            }
+            _ => {}
+        }
+    });
+
+    match result {
+        Ok(_) => 1,
+        Err(_) => {
+            // Panic caught!
+            unsafe {
+                // Try logging the panic if possible, or just fail safely.
+                 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
+                 let msg = "PANIC IN DLLMAIN!\0";
+                 OutputDebugStringA(msg.as_ptr());
+            }
+            // If we panic in ATTACH, we should probably return FALSE to fail the load safely.
+            0
+        }
+    }
 }
