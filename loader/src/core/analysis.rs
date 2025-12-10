@@ -129,8 +129,7 @@ fn run_analysis(
     *status_arc.lock().unwrap() = format!("Injecting into PID {}...", pid);
 
     let injection_result = if use_manual_map {
-        // injection::manual_map_inject(pid, dll_path)
-        Err("Manual Mapping not yet implemented.".to_string())
+        injection::manual_map_inject(pid, dll_path)
     } else {
         injection::inject_dll(pid, dll_path)
     };

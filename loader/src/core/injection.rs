@@ -33,7 +33,7 @@ use crate::app::state::ModuleInfo;
 use windows_sys::Win32::System::Diagnostics::Debug::{WriteProcessMemory, ReadProcessMemory};
 use pelite::pe64::{Pe, PeFile};
 use pelite::pe64::imports::Import;
-use windows_sys::Win32::System::Memory::{VirtualProtectEx, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_NOACCESS, PAGE_READONLY, PAGE_WRITECOPY, MEM_RELEASE, VirtualFreeEx};
+use windows_sys::Win32::System::Memory::{VirtualProtectEx, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READONLY};
 use windows_sys::Win32::System::SystemServices::{IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_ABSOLUTE};
 use windows_sys::Win32::System::Threading::GetProcessId;
 
@@ -434,7 +434,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                 for reloc in block.words() {
                     let r_type = (reloc >> 12) as u8;
                     let r_offset = (reloc & 0xFFF) as u32;
-                    let r_va = block.image.virtual_address as u32 + r_offset;
+                    let r_va = block.image().VirtualAddress as u32 + r_offset;
                     let target_va = remote_base as usize + r_va as usize;
 
                     let mut current_val: u64 = 0;
@@ -449,10 +449,10 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                     }
                     
                     match r_type {
-                        IMAGE_REL_BASED_DIR64 => {
+                        r if r == IMAGE_REL_BASED_DIR64 as u8 => {
                             current_val = current_val.wrapping_add(delta);
                         }
-                         IMAGE_REL_BASED_HIGHLOW => {
+                         r if r == IMAGE_REL_BASED_HIGHLOW as u8 => {
                              let mut val32 = current_val as u32;
                              val32 = val32.wrapping_add(delta as u32);
                              unsafe {
@@ -466,7 +466,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                              }
                              continue;
                         }
-                        IMAGE_REL_BASED_ABSOLUTE => continue,
+                        r if r == IMAGE_REL_BASED_ABSOLUTE as u8 => continue,
                         _ => continue,
                     }
 
@@ -495,7 +495,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
             let module_handle_in_target = load_library_remote(process_handle, &module_name)?;
 
             let int = match import_desc.int() { Ok(i) => i, Err(_) => continue };
-            let iat_rva = import_desc.first_thunk;
+            let iat_rva = import_desc.image().FirstThunk;
 
             for (i, import) in int.enumerate() {
                  let import = match import { Ok(i) => i, Err(_) => continue };
@@ -513,7 +513,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                              return Err(format!("Could not load dependency locally: {}", module_name));
                          }
 
-                         let proc_name_c = std::ffi::CString::new(name.as_bytes()).unwrap();
+                         let proc_name_c = std::ffi::CString::new(name.as_ref()).unwrap();
                          let local_proc = unsafe { GetProcAddress(local_module, proc_name_c.as_ptr() as _) };
                          
                          if local_proc.is_none() {
@@ -525,7 +525,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                          let offset = local_proc_addr - local_module as usize;
                          module_handle_in_target as usize + offset
                      }
-                     Import::ByOrdinal { ordinal } => {
+                     Import::ByOrdinal { ord: ordinal } => {
                           let local_module = unsafe {
                             let name_w = U16CString::from_str(&module_name).unwrap();
                             windows_sys::Win32::System::LibraryLoader::LoadLibraryW(name_w.as_ptr())
@@ -586,19 +586,40 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     }
 
-    // 7. Execute DllMain
+    // 7. Execute DllMain (and TLS callbacks)
     let entry_point = optional_header.AddressOfEntryPoint;
     let dll_main_addr = remote_base as usize + entry_point as usize;
+
+    // TLS callbacks: AddressOfCallBacks in TLS directory is a VA (not RVA).
+    // It points to a null-terminated array of callback function pointers.
+    // We need to apply the relocation delta to both the pointer to the array AND
+    // each callback address in the array (they were stored as absolute VAs at link time).
+    let tls_callbacks_ptr = if let Ok(tls) = pe.tls() {
+         let callback_array_va = tls.image().AddressOfCallBacks;
+         if callback_array_va != 0 {
+             // The AddressOfCallBacks is a VA that was based on preferred ImageBase.
+             // After relocation, we need to apply delta to get the actual address in remote process.
+             // callback_array_va - preferred_base + remote_base = new address
+             let relocated_array_ptr = (callback_array_va as i64 + delta as i64) as u64;
+             relocated_array_ptr
+         } else {
+             0
+         }
+    } else { 
+        0 
+    };
 
     #[repr(C)]
     struct ShellcodeData {
         dll_base: u64,
         dll_main: u64,
+        tls_callbacks_ptr: u64,
     }
     
     let sc_data = ShellcodeData {
         dll_base: remote_base as u64,
         dll_main: dll_main_addr as u64,
+        tls_callbacks_ptr,
     };
     
     let sc_data_size = std::mem::size_of::<ShellcodeData>();
@@ -615,16 +636,106 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         );
     }
     
-    // x64 Shellcode
-    let shellcode: [u8; 26] = [
-        0x48, 0x83, 0xEC, 0x28,                     // sub rsp, 0x28
-        0x48, 0x8B, 0x41, 0x08,                     // mov rax, [rcx + 8] (dll_main)
-        0x48, 0x8B, 0x09,                           // mov rcx, [rcx]     (dll_base)
-        0xBA, 0x01, 0x00, 0x00, 0x00,               // mov rdx, 1         (DLL_PROCESS_ATTACH)
-        0x45, 0x31, 0xC0,                           // xor r8d, r8d       (Reserved = 0)
-        0xFF, 0xD0,                                 // call rax           (Call DllMain)
-        0x48, 0x83, 0xC4, 0x28,                     // add rsp, 0x28
-        0xC3                                        // ret
+    // x64 Shellcode - Properly handles TLS callbacks + DllMain with correct x64 ABI
+    // 
+    // Function signature for DllMain/TLS callbacks:
+    //   BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
+    //   rcx = hinstDLL (dll_base)
+    //   rdx = fdwReason (1 = DLL_PROCESS_ATTACH)
+    //   r8  = lpvReserved (NULL for dynamic loads)
+    //
+    // ShellcodeData layout (passed in rcx by CreateRemoteThread):
+    //   +0x00: dll_base
+    //   +0x08: dll_main address
+    //   +0x10: tls_callbacks_ptr (pointer to null-terminated array of callback VAs)
+    //
+    // Shellcode (x64, proper ABI with 0x28 shadow space for alignment):
+    //   push rbx, rsi, rdi, r12, r13, r14, r15  ; save non-volatile registers
+    //   sub rsp, 0x28                           ; shadow space (32) + alignment (8) = 0x28
+    //   mov rbx, rcx                            ; rbx = pointer to ShellcodeData
+    //   mov r12, [rbx]                          ; r12 = dll_base
+    //   mov r13d, 1                             ; r13 = DLL_PROCESS_ATTACH
+    //   xor r14, r14                            ; r14 = NULL (lpvReserved)
+    //   
+    //   ; Call TLS callbacks if any
+    //   mov rsi, [rbx+0x10]                     ; rsi = tls_callbacks_ptr
+    //   test rsi, rsi                           ; if NULL, skip TLS
+    //   jz .call_dllmain
+    // .tls_loop:
+    //   mov rax, [rsi]                          ; rax = current callback
+    //   test rax, rax                           ; if NULL, end of array
+    //   jz .call_dllmain
+    //   mov rcx, r12                            ; arg1 = dll_base
+    //   mov rdx, r13                            ; arg2 = DLL_PROCESS_ATTACH  
+    //   mov r8, r14                             ; arg3 = NULL
+    //   call rax
+    //   add rsi, 8                              ; next callback
+    //   jmp .tls_loop
+    //
+    // .call_dllmain:
+    //   mov rax, [rbx+0x08]                     ; rax = dll_main
+    //   test rax, rax
+    //   jz .done
+    //   mov rcx, r12                            ; arg1 = dll_base
+    //   mov rdx, r13                            ; arg2 = DLL_PROCESS_ATTACH
+    //   mov r8, r14                             ; arg3 = NULL
+    //   call rax
+    // .done:
+    //   add rsp, 0x28
+    //   pop r15, r14, r13, r12, rdi, rsi, rbx
+    //   ret
+    let shellcode: [u8; _] = [
+        // Prologue: save non-volatile registers and allocate shadow space
+        0x53,                               // push rbx
+        0x56,                               // push rsi
+        0x57,                               // push rdi
+        0x41, 0x54,                         // push r12
+        0x41, 0x55,                         // push r13
+        0x41, 0x56,                         // push r14
+        0x41, 0x57,                         // push r15
+        0x48, 0x83, 0xEC, 0x28,             // sub rsp, 0x28 (shadow space + alignment)
+        
+        // Load parameters from ShellcodeData
+        0x48, 0x89, 0xCB,                   // mov rbx, rcx (rbx = &ShellcodeData)
+        0x4C, 0x8B, 0x23,                   // mov r12, [rbx] (r12 = dll_base)
+        0x41, 0xBD, 0x01, 0x00, 0x00, 0x00, // mov r13d, 1 (DLL_PROCESS_ATTACH)
+        0x4D, 0x31, 0xF6,                   // xor r14, r14 (r14 = NULL for lpvReserved)
+        
+        // TLS callbacks loop
+        0x48, 0x8B, 0x73, 0x10,             // mov rsi, [rbx+0x10] (rsi = tls_callbacks_ptr)
+        0x48, 0x85, 0xF6,                   // test rsi, rsi
+        0x74, 0x18,                         // jz .call_dllmain (offset to dllmain code)
+        
+        // .tls_loop:
+        0x48, 0x8B, 0x06,                   // mov rax, [rsi]
+        0x48, 0x85, 0xC0,                   // test rax, rax
+        0x74, 0x10,                         // jz .call_dllmain
+        0x4C, 0x89, 0xE1,                   // mov rcx, r12 (arg1 = dll_base)
+        0x4C, 0x89, 0xEA,                   // mov rdx, r13 (arg2 = 1)
+        0x4D, 0x89, 0xF0,                   // mov r8, r14 (arg3 = NULL)
+        0xFF, 0xD0,                         // call rax
+        0x48, 0x83, 0xC6, 0x08,             // add rsi, 8
+        0xEB, 0xE8,                         // jmp .tls_loop
+        
+        // .call_dllmain:
+        0x48, 0x8B, 0x43, 0x08,             // mov rax, [rbx+0x08] (rax = dll_main)
+        0x48, 0x85, 0xC0,                   // test rax, rax
+        0x74, 0x0B,                         // jz .done
+        0x4C, 0x89, 0xE1,                   // mov rcx, r12 (arg1 = dll_base)
+        0x4C, 0x89, 0xEA,                   // mov rdx, r13 (arg2 = 1)
+        0x4D, 0x89, 0xF0,                   // mov r8, r14 (arg3 = NULL)
+        0xFF, 0xD0,                         // call rax
+        
+        // .done: Epilogue
+        0x48, 0x83, 0xC4, 0x28,             // add rsp, 0x28
+        0x41, 0x5F,                         // pop r15
+        0x41, 0x5E,                         // pop r14
+        0x41, 0x5D,                         // pop r13
+        0x41, 0x5C,                         // pop r12
+        0x5F,                               // pop rdi
+        0x5E,                               // pop rsi
+        0x5B,                               // pop rbx
+        0xC3,                               // ret
     ];
 
     let shellcode_size = shellcode.len();
@@ -664,9 +775,74 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
     Ok(process_handle)
 }
 
+/// Resolves API Set DLL names to their actual implementation DLLs.
+/// API Sets (api-ms-win-*) are virtual DLLs that forward to real implementations.
+fn resolve_api_set(dll_name: &str) -> String {
+    let lower_name = dll_name.to_lowercase();
+    
+    // Check if this is an API set DLL
+    if lower_name.starts_with("api-ms-win-") || lower_name.starts_with("ext-ms-win-") {
+        // Common API set mappings to their actual implementations
+        // Most synchronization, memory, and core APIs are in kernelbase.dll or kernel32.dll
+        if lower_name.contains("core-") || 
+           lower_name.contains("synch-") || 
+           lower_name.contains("processthreads-") ||
+           lower_name.contains("memory-") ||
+           lower_name.contains("handle-") ||
+           lower_name.contains("libraryloader-") ||
+           lower_name.contains("heap-") ||
+           lower_name.contains("interlocked-") ||
+           lower_name.contains("profile-") ||
+           lower_name.contains("string-") ||
+           lower_name.contains("sysinfo-") ||
+           lower_name.contains("errorhandling-") ||
+           lower_name.contains("fibers-") ||
+           lower_name.contains("namedpipe-") ||
+           lower_name.contains("file-") ||
+           lower_name.contains("console-") ||
+           lower_name.contains("timezone-") ||
+           lower_name.contains("localization-") {
+            return "kernelbase.dll".to_string();
+        }
+        
+        // Security APIs
+        if lower_name.contains("security-") {
+            return "kernelbase.dll".to_string();
+        }
+        
+        // Registry APIs
+        if lower_name.contains("registry-") {
+            return "kernelbase.dll".to_string();
+        }
+        
+        // COM APIs
+        if lower_name.contains("com-") {
+            return "combase.dll".to_string();
+        }
+        
+        // Default fallback for unknown API sets
+        return "kernelbase.dll".to_string();
+    }
+    
+    // Not an API set, return as-is
+    dll_name.to_string()
+}
+
 fn load_library_remote(process: windows_sys::Win32::Foundation::HANDLE, dll_name: &str) -> Result<isize, String> {
     unsafe {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        
+        // Resolve API set DLLs to their actual implementations
+        let resolved_dll_name = resolve_api_set(dll_name);
+        
+        // Check if the resolved DLL is already loaded in the target process
+        let modules = get_modules_for_process(GetProcessId(process))?;
+        for m in &modules {
+            if m.name.eq_ignore_ascii_case(&resolved_dll_name) {
+                return Ok(m.base_address as isize);
+            }
+        }
+        
         let kernel32 = U16CString::from_str("kernel32.dll").unwrap();
         let load_lib_str = std::ffi::CString::new("LoadLibraryW").unwrap();
         let load_library_addr = GetProcAddress(GetModuleHandleW(kernel32.as_ptr()), load_lib_str.as_ptr() as _);
@@ -675,11 +851,11 @@ fn load_library_remote(process: windows_sys::Win32::Foundation::HANDLE, dll_name
             return Err("Failed to find LoadLibraryW".to_string());
         }
 
-        let dll_name_wide = U16CString::from_str(dll_name).unwrap();
+        let dll_name_wide = U16CString::from_str(&resolved_dll_name).unwrap();
         let size = (dll_name_wide.len() + 1) * 2;
         let remote_str = VirtualAllocEx(process, std::ptr::null(), size, MEM_COMMIT, PAGE_READWRITE);
         if remote_str.is_null() {
-            return Err("Failed to allocate remote string".to_string());
+            return Err(format!("Failed to allocate remote string for {}", resolved_dll_name));
         }
         
         WriteProcessMemory(process, remote_str, dll_name_wide.as_ptr() as _, size, std::ptr::null_mut());
@@ -694,19 +870,28 @@ fn load_library_remote(process: windows_sys::Win32::Foundation::HANDLE, dll_name
             std::ptr::null_mut()
         );
         
+        if thread == 0 {
+            return Err(format!("Failed to create remote thread for loading {}", resolved_dll_name));
+        }
+        
         WaitForSingleObject(thread, 5000);
         
         let mut exit_code = 0;
         GetExitCodeThread(thread, &mut exit_code);
         CloseHandle(thread);
         
+        if exit_code == 0 {
+            return Err(format!("LoadLibraryW returned NULL for {} (resolved from {})", resolved_dll_name, dll_name));
+        }
+        
+        // Re-scan modules to find the newly loaded DLL
         let modules = get_modules_for_process(GetProcessId(process))?;
         for m in modules {
-            if m.name.eq_ignore_ascii_case(dll_name) {
+            if m.name.eq_ignore_ascii_case(&resolved_dll_name) {
                 return Ok(m.base_address as isize);
             }
         }
         
-        Err(format!("Could not load dependency: {}", dll_name))
+        Err(format!("Could not load dependency: {} (resolved to {})", dll_name, resolved_dll_name))
     }
 }
