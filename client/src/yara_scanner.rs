@@ -20,9 +20,22 @@ pub struct YaraScanner {
 }
 
 #[cfg(feature = "use_yara")]
+const EMBEDDED_RULES: &str = include_str!(concat!(env!("OUT_DIR"), "/all_rules.yar"));
+
+#[cfg(feature = "use_yara")]
 impl YaraScanner {
     pub fn new() -> Self {
-        Self { rules: None }
+        let mut instance = Self { rules: None };
+        if let Err(e) = instance.compile_rules(EMBEDDED_RULES) {
+            log_event(
+                LogLevel::Error,
+                LogEvent::Error {
+                    source: "YaraScanner".to_string(),
+                    message: format!("Failed to compile embedded YARA rules: {}", e),
+                },
+            );
+        }
+        instance
     }
 
     pub fn compile_rules(&mut self, rules_str: &str) -> Result<(), String> {
