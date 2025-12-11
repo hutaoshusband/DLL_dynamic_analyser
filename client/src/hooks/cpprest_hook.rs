@@ -78,7 +78,10 @@ unsafe fn hooked_cpprest_send_request(
 /// This function finds the target function in memory using its signature and, if found,
 /// applies the hook. This should be called once during DLL initialization.
 pub fn initialize_and_enable_hook() {
+    crate::crash_logger::log_init_step("cpprest hook: Starting initialization");
+    
     if let Some(addr) = *CPPREST_SEND_REQUEST_FN_ADDR {
+        crate::crash_logger::log_hook("cpprest_send_request", true, Some(addr), "Signature found");
         log_event(LogLevel::Info, LogEvent::Initialization {
             status: format!("Found cpprest!_http_client_communicator::async_send_request_impl at address: {:#X}", addr),
         });
@@ -86,13 +89,14 @@ pub fn initialize_and_enable_hook() {
         unsafe {
             let target_fn = transmute(addr);
             
-            // The `initialize` function expects a closure, so we wrap our unsafe function call.
+            crate::crash_logger::log_init_step("cpprest hook: Initializing detour");
             let hook_result = CppRestSendRequestHook.initialize(
                 target_fn, 
                 |this, req| hooked_cpprest_send_request(this, req)
             );
 
             if hook_result.is_err() {
+                crate::crash_logger::log_hook("cpprest_send_request", false, Some(addr), "Initialization failed");
                 log_event(LogLevel::Error, LogEvent::Error {
                     source: "cpprest_hook".to_string(),
                     message: "Failed to initialize cpprest hook".to_string(),
@@ -100,20 +104,25 @@ pub fn initialize_and_enable_hook() {
                 return;
             }
             
+            crate::crash_logger::log_init_step("cpprest hook: Enabling hook");
             if CppRestSendRequestHook.enable().is_err() {
+                crate::crash_logger::log_hook("cpprest_send_request", false, Some(addr), "Enable failed");
                  log_event(LogLevel::Error, LogEvent::Error {
                     source: "cpprest_hook".to_string(),
                     message: "Failed to enable cpprest hook".to_string(),
                 });
             } else {
+                crate::crash_logger::log_hook("cpprest_send_request", true, Some(addr), "Hook enabled successfully");
                  log_event(LogLevel::Info, LogEvent::Initialization {
                     status: "Successfully enabled cpprest hook.".to_string(),
                 });
             }
         }
     } else {
+        crate::crash_logger::log_hook("cpprest_send_request", false, None, "Signature not found in memory");
         log_event(LogLevel::Warn, LogEvent::Initialization {
             status: "cpprest function signature not found. Hook not applied.".to_string(),
         });
     }
+    crate::crash_logger::log_init_step("cpprest hook: Initialization complete");
 }

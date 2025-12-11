@@ -4,3 +4,4 @@
 
 pub mod cpprest_hook;
 pub mod winapi_hooks;
+pub mod stealth_hooks;

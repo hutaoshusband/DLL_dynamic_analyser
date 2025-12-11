@@ -6,8 +6,13 @@ pub mod logging;
 
 use serde::{Deserialize, Serialize};
 
-pub const COMMANDS_PIPE_NAME: &str = r"\\.\pipe\hutaoshusband_monitor_commands_pipe";
-pub const LOGS_PIPE_NAME: &str = r"\\.\pipe\hutaoshusband_monitor_logs_pipe";
+pub fn get_commands_pipe_name(pid: u32) -> String {
+    format!(r"\\.\pipe\hutaoshusband_monitor_commands_pipe_{}", pid)
+}
+
+pub fn get_logs_pipe_name(pid: u32) -> String {
+    format!(r"\\.\pipe\hutaoshusband_monitor_logs_pipe_{}", pid)
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
@@ -29,6 +34,7 @@ pub enum Command {
     CalculateEntropy { module_name: String, name: String },
     UpdateConfig(MonitorConfig),
     DumpModule { module_name: String },
+    LoadYaraRules(String),
 }
 
 // This macro simplifies the creation and maintenance of the MonitorConfig struct.

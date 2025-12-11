@@ -15,7 +15,7 @@ use windows_sys::Win32::{
     },
 };
 
-use shared::{Command, MonitorConfig, COMMANDS_PIPE_NAME, LOGS_PIPE_NAME};
+use shared::{Command, MonitorConfig, get_commands_pipe_name, get_logs_pipe_name};
 use widestring::U16CString;
 
 pub fn start_pipe_log_listener(
@@ -72,7 +72,7 @@ fn connect_to_pipe(
     pipe_name: &str,
     access: u32,
     status_arc: &Arc<Mutex<String>>,
-    logger: &Sender<String>,
+    _logger: &Sender<String>,  // Kept for signature compatibility but not used here
 ) -> Option<isize> {
     let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
     const MAX_RETRIES: u32 = 60; // Increased to 30 seconds
@@ -93,16 +93,16 @@ fn connect_to_pipe(
 
         if pipe_handle != INVALID_HANDLE_VALUE {
             let msg = format!("Successfully connected to {}.", pipe_name);
-            *status_arc.lock().unwrap() = msg.clone();
-            let _ = logger.send(msg);
+            *status_arc.lock().unwrap() = msg;
+            // Don't send to logger - these are status messages, not JSON logs
             return Some(pipe_handle);
         }
 
         let err = unsafe { GetLastError() };
         if err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND {
             let msg = format!("Failed to connect to {}. Error: {}", pipe_name, err);
-            *status_arc.lock().unwrap() = msg.clone();
-            let _ = logger.send(msg);
+            *status_arc.lock().unwrap() = msg;
+            // Don't send to logger - these are status messages, not JSON logs
             return None;
         }
 
@@ -112,22 +112,18 @@ fn connect_to_pipe(
             i + 1,
             MAX_RETRIES
         );
-        *status_arc.lock().unwrap() = msg.clone();
-        // We might not want to spam the main log with retries, but if it fails eventually, the final error is logged.
-        // Uncomment below if detailed retry logs are desired in the GUI.
-        // let _ = logger.send(msg);
-
+        *status_arc.lock().unwrap() = msg;
         thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
     }
 
     let msg = format!("Failed to connect to {} after all retries.", pipe_name);
-    *status_arc.lock().unwrap() = msg.clone();
-    let _ = logger.send(msg);
+    *status_arc.lock().unwrap() = msg;
+    // Don't send to logger - these are status messages, not JSON logs
     None
 }
 
 pub fn connect_and_send_config(
-    _pid: u32,
+    pid: u32,
     config: &MonitorConfig,
     commands_pipe_handle_arc: Arc<Mutex<Option<isize>>>,
     logs_pipe_handle_arc: Arc<Mutex<Option<isize>>>,
@@ -136,12 +132,12 @@ pub fn connect_and_send_config(
 ) -> bool {
     // Connect to the two separate pipes.
     let commands_pipe_handle =
-        match connect_to_pipe(COMMANDS_PIPE_NAME, FILE_GENERIC_WRITE, &status_arc, &logger) {
+        match connect_to_pipe(&get_commands_pipe_name(pid), FILE_GENERIC_WRITE, &status_arc, &logger) {
             Some(handle) => handle,
             None => return false,
         };
 
-    let logs_pipe_handle = match connect_to_pipe(LOGS_PIPE_NAME, FILE_GENERIC_READ, &status_arc, &logger) {
+    let logs_pipe_handle = match connect_to_pipe(&get_logs_pipe_name(pid), FILE_GENERIC_READ, &status_arc, &logger) {
         Some(handle) => handle,
         None => {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(commands_pipe_handle) };

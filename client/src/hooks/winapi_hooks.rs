@@ -1837,24 +1837,29 @@ pub unsafe fn hooked_crypt_decrypt(
     result
 }
 
-
 macro_rules! hook {
     ($hook:ident, $func:expr, $hook_fn:expr) => {
         let func_name = stringify!($func);
-        if let Err(e) = $hook.initialize($func, $hook_fn).and_then(|_| $hook.enable()) {
-            log_event(
-                LogLevel::Error,
-                LogEvent::Error {
-                    source: "StaticHook".to_string(),
-                    message: format!("Failed to hook {}: {}", func_name, e),
-                },
-            );
-            // Do not return an error, just log it and continue.
+        match $hook.initialize($func, $hook_fn).and_then(|_| $hook.enable()) {
+            Ok(_) => {
+                crate::crash_logger::log_hook(func_name, true, None, "Hook installed");
+            }
+            Err(e) => {
+                crate::crash_logger::log_hook(func_name, false, None, &format!("Failed: {}", e));
+                log_event(
+                    LogLevel::Error,
+                    LogEvent::Error {
+                        source: "StaticHook".to_string(),
+                        message: format!("Failed to hook {}: {}", func_name, e),
+                    },
+                );
+            }
         }
     };
 }
 
 pub unsafe fn initialize_all_hooks() {
+    crate::crash_logger::log_init_step("WinAPI hooks: Starting initialization");
     let config = CONFIG.features.read().unwrap();
 
     // Hook critical process termination functions.
@@ -2073,10 +2078,13 @@ pub unsafe fn initialize_all_hooks() {
         );
     }
 
+    crate::crash_logger::log_init_step("WinAPI hooks: Static hooks complete, starting dynamic hooks");
     initialize_dynamic_hooks();
+    crate::crash_logger::log_init_step("WinAPI hooks: All hooks initialized");
 }
 
 unsafe fn initialize_dynamic_hooks() {
+    crate::crash_logger::log_init_step("WinAPI hooks: Dynamic hooks starting");
     let config = CONFIG.features.read().unwrap();
 
     macro_rules! dyn_hook {
