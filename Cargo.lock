@@ -2070,6 +2070,7 @@ dependencies = [
  "egui_plot",
  "embed-resource",
  "pelite",
+ "raw-window-handle 0.6.2",
  "rfd",
  "serde",
  "serde_json",
