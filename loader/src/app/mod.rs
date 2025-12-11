@@ -11,7 +11,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED,
 };
 
-use self::state::{ActiveTab, AppState};
+use self::state::{ActiveTab, AppState, RippleAnimation};
+
+
+fn get_tab_index(tab: ActiveTab) -> usize {
+    match tab {
+        ActiveTab::Launcher => 0,
+        ActiveTab::Logs => 1,
+        ActiveTab::MemoryAnalysis => 2,
+        ActiveTab::Hooking => 3,
+        ActiveTab::Network => 4,
+    }
+}
 
 pub struct App {
     state: Arc<Mutex<AppState>>,
@@ -182,9 +193,49 @@ impl eframe::App for App {
                             );
                         }
 
+
                         if response.clicked() {
-                            state.active_tab = *tab;
+                            if state.active_tab != *tab {
+                                state.previous_tab = Some(state.active_tab);
+                                state.tab_transition_start = Some(ctx.input(|i| i.time));
+                                state.active_tab = *tab;
+                            }
+                            
+                            // Add Ripple Effect
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                state.active_ripples.push(RippleAnimation {
+                                    start_time: ctx.input(|i| i.time),
+                                    center: pos,
+                                    color: egui::Color32::from_rgb(0x33, 0xCC, 0xFF),
+                                });
+                            }
                         }
+                    }
+
+                    // --- Render Ripples ---
+                    let current_time = ctx.input(|i| i.time);
+                    state.active_ripples.retain(|ripple| {
+                        let elapsed = current_time - ripple.start_time;
+                        let duration = 0.6; // 600ms animation
+                        if elapsed >= duration {
+                            false
+                        } else {
+                            let t = elapsed as f32 / duration as f32;
+                            let radius = t * 150.0; // Max radius 150
+                            let opacity = (1.0 - t).powi(2); // Quadratic ease-out or just squared falloff for faster fade
+                            
+                            // Use a separate painter to draw on top of everything in this layer
+                             ui.ctx().layer_painter(ui.layer_id()).circle_filled(
+                                ripple.center,
+                                radius,
+                                ripple.color.linear_multiply(opacity),
+                            );
+                            true
+                        }
+                    });
+
+                    if !state.active_ripples.is_empty() {
+                        ctx.request_repaint();
                     }
 
                     // Window Controls (Min, Max, Close)
@@ -216,8 +267,68 @@ impl eframe::App for App {
                 // Add a separator and space for visual clarity
                 ui.add(egui::Separator::default().spacing(10.0));
 
-                // Render the content for the active tab
-                crate::gui::render_active_tab(ctx, ui, &mut state);
+                // --- Tab Content Transition ---
+                let mut transition_active = false;
+                if let (Some(prev_tab), Some(start_time)) = (state.previous_tab, state.tab_transition_start) {
+                    let now = ctx.input(|i| i.time);
+                    let duration = 0.3; // 300ms transition
+                    let t = (now - start_time) / duration;
+
+                    if t < 1.0 {
+                        transition_active = true;
+                        let t = t as f32;
+                        // Cubic ease out: 1 - (1-t)^3
+                        let t_ease = 1.0 - (1.0 - t).powi(3);
+                        
+                        let prev_idx = get_tab_index(prev_tab);
+                        let curr_idx = get_tab_index(state.active_tab);
+                        let dir = if curr_idx > prev_idx { 1.0 } else { -1.0 };
+                        
+                        let rect = ui.available_rect_before_wrap();
+                        let width = rect.width();
+
+                        // Clip to viewport
+                        ui.set_clip_rect(rect);
+
+                        // Render Previous Tab (Sliding Out)
+                        {
+                            let offset_x = -dir * width * t_ease;
+                            let mut prev_rect = rect;
+                            prev_rect = prev_rect.translate(egui::vec2(offset_x, 0.0));
+                            
+                            ui.allocate_ui_at_rect(prev_rect, |ui| {
+                                ui.push_id("prev_tab_view", |ui| {
+                                     crate::gui::render_tab(ctx, ui, &mut state, prev_tab);
+                                });
+                            });
+                        }
+
+                        // Render Current Tab (Sliding In)
+                        {
+                            let offset_x = dir * width * (1.0 - t_ease);
+                            let mut curr_rect = rect;
+                            curr_rect = curr_rect.translate(egui::vec2(offset_x, 0.0));
+
+                            ui.allocate_ui_at_rect(curr_rect, |ui| {
+                                ui.push_id("curr_tab_view", |ui| {
+                                     let current_tab = state.active_tab;
+                                     crate::gui::render_tab(ctx, ui, &mut state, current_tab);
+                                });
+                            });
+                        }
+                        
+                        ctx.request_repaint();
+                    } else {
+                        // Transition finished
+                        state.previous_tab = None;
+                        state.tab_transition_start = None;
+                    }
+                }
+
+                if !transition_active {
+                    let current_tab = state.active_tab;
+                    crate::gui::render_tab(ctx, ui, &mut state, current_tab);
+                }
             });
 
 
