@@ -18,6 +18,7 @@ mod string_dumper;
 mod vmp_dumper;
 #[cfg(feature = "use_yara")]
 mod yara_scanner;
+pub mod crash_logger;
 
 use crate::config::CONFIG;
 use crate::hooks::{cpprest_hook, winapi_hooks};
@@ -26,7 +27,7 @@ use crate::security::SecurityAttributes;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use once_cell::sync::OnceCell;
 use shared::logging::{LogEntry, LogEvent, LogLevel, SectionInfo};
-use shared::{Command, COMMANDS_PIPE_NAME, LOGS_PIPE_NAME};
+use shared::{Command, get_commands_pipe_name, get_logs_pipe_name};
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -206,7 +207,7 @@ fn main_initialization_thread() {
     };
 
     let commands_pipe_handle = unsafe {
-        let wide_pipe_name = U16CString::from_str(COMMANDS_PIPE_NAME).unwrap();
+        let wide_pipe_name = U16CString::from_str(&get_commands_pipe_name(unsafe { GetCurrentProcessId() })).unwrap();
         CreateNamedPipeW(
             wide_pipe_name.as_ptr(),
             PIPE_ACCESS_INBOUND, // Client reads commands from this pipe
@@ -226,7 +227,7 @@ fn main_initialization_thread() {
     debug_log("Commands pipe created successfully.");
 
     let logs_pipe_handle = unsafe {
-        let wide_pipe_name = U16CString::from_str(LOGS_PIPE_NAME).unwrap();
+        let wide_pipe_name = U16CString::from_str(&get_logs_pipe_name(unsafe { GetCurrentProcessId() })).unwrap();
         CreateNamedPipeW(
             wide_pipe_name.as_ptr(),
             PIPE_ACCESS_OUTBOUND, // Client writes logs to this pipe
@@ -247,16 +248,27 @@ fn main_initialization_thread() {
 
     // --- Connect Pipes ---
     debug_log("Waiting for loader to connect to both pipes...");
-    let commands_connected = unsafe { ConnectNamedPipe(commands_pipe_handle, std::ptr::null_mut()) } != 0;
-    let logs_connected = unsafe { ConnectNamedPipe(logs_pipe_handle, std::ptr::null_mut()) } != 0;
+    
+    // ConnectNamedPipe returns 0 on failure. However, if the client has already connected
+    // between CreateNamedPipe and ConnectNamedPipe, it returns 0 and GetLastError() is ERROR_PIPE_CONNECTED.
+    // This is considered a SUCCESS.
+    let ERROR_PIPE_CONNECTED = 535u32;
+
+    let commands_res = unsafe { ConnectNamedPipe(commands_pipe_handle, std::ptr::null_mut()) };
+    let commands_err = unsafe { GetLastError() };
+    let commands_connected = commands_res != 0 || commands_err == ERROR_PIPE_CONNECTED;
+
+    let logs_res = unsafe { ConnectNamedPipe(logs_pipe_handle, std::ptr::null_mut()) };
+    let logs_err = unsafe { GetLastError() };
+    let logs_connected = logs_res != 0 || logs_err == ERROR_PIPE_CONNECTED;
 
     if !commands_connected || !logs_connected {
         debug_log(&format!(
             "Failed to connect named pipes. Commands: {} (err {}), Logs: {} (err {}).",
             commands_connected,
-            unsafe { GetLastError() },
+            commands_err,
             logs_connected,
-            unsafe { GetLastError() }
+            logs_err
         ));
         unsafe {
             CloseHandle(commands_pipe_handle);
@@ -276,6 +288,11 @@ fn main_initialization_thread() {
                         "Initial config parsed. Loader path: '{}'",
                         &config.loader_path
                     ));
+                    
+                    // Initialize crash_logger with the loader path for logs/ folder
+                    crash_logger::init(&config.loader_path);
+                    crash_logger::log_init_step("Config received, crash_logger initialized with loader path");
+                    
                     let cloned_config = config.clone();
                     *CONFIG.features.write().unwrap() = config;
 
@@ -283,9 +300,11 @@ fn main_initialization_thread() {
                     LOG_SENDER.set(sender).expect("Log sender already set");
 
                     // Spawn threads with their dedicated pipes
+                    crash_logger::log_init_step("Spawning command listener thread");
                     let command_thread = thread::spawn(move || {
                         command_listener_thread(commands_pipe_handle, message_buffer)
                     });
+                    crash_logger::log_init_step("Spawning log thread");
                     let log_thread =
                         thread::spawn(move || logging_thread_main(receiver, logs_pipe_handle));
 
@@ -293,8 +312,10 @@ fn main_initialization_thread() {
                     handles.push(log_thread);
                     handles.push(command_thread);
 
+                    crash_logger::log_init_step("Starting feature initialization");
                     debug_log("Starting feature initialization...");
                     initialize_features(cloned_config);
+                    crash_logger::log_init_step("Feature initialization returned");
                     debug_log("Feature initialization returned.");
                 }
                 Ok(_) => {
@@ -620,6 +641,7 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
 
 use shared::MonitorConfig;
 fn initialize_features(config: MonitorConfig) {
+    crash_logger::log_init_step("initialize_features() starting");
     debug_log("initialize_features() called");
     log_event(LogLevel::Info, LogEvent::Initialization { status: "HUTAOSHUSBAND's Advanced Analysis Framework enabled.".to_string() });
     log_event(LogLevel::Info, LogEvent::Initialization { status: format!("Configuration received: {:?}", config) });
@@ -628,37 +650,49 @@ fn initialize_features(config: MonitorConfig) {
     log_event(LogLevel::Debug, LogEvent::Initialization { status: format!("TERMINATION_FLAG_ADDR:{}", addr) });
 
     if config.api_hooks_enabled {
+        crash_logger::log_init_step("API hooks enabled - starting hook initialization");
         debug_log("API hooks enabled - initializing WinAPI hooks...");
+        
+        crash_logger::log_init_step("About to call winapi_hooks::initialize_all_hooks()");
         unsafe {
             winapi_hooks::initialize_all_hooks();
         }
+        crash_logger::log_init_step("winapi_hooks::initialize_all_hooks() completed");
         debug_log("WinAPI hooks initialized successfully");
         
+        crash_logger::log_init_step("Spawning CPP REST hook thread");
         debug_log("Spawning CPP REST hook thread...");
         thread::spawn(cpprest_hook::initialize_and_enable_hook);
+        crash_logger::log_init_step("CPP REST hook thread spawned");
         debug_log("CPP REST hook thread spawned");
 
+        crash_logger::log_init_step("About to initialize stealth hooks (Hardware Breakpoints)");
         debug_log("Initializing stealth hooks (Hardware Breakpoints)...");
         unsafe {
             crate::hooks::stealth_hooks::initialize_stealth_hooks();
         }
+        crash_logger::log_init_step("Stealth hooks initialization returned");
         debug_log("Stealth hooks initialized.");
     } else {
+        crash_logger::log_init_step("API hooks disabled in config");
         debug_log("API hooks disabled in config");
     }
 
     let mut scanner_threads = Vec::new();
     if config.vmp_dump_enabled {
+        crash_logger::log_init_step("Starting VMP monitoring thread");
         debug_log("VMP dump enabled - starting VMP monitoring...");
         scanner_threads.push(thread::spawn(vmp_dumper::start_vmp_monitoring));
     }
     if config.string_dump_enabled {
+        crash_logger::log_init_step("Starting string dumper thread");
         debug_log("String dump enabled - starting string dumper...");
         scanner_threads.push(thread::spawn(string_dumper::start_string_dumper));
     }
 
     #[cfg(feature = "use_yara")]
     {
+         crash_logger::log_init_step("Starting YARA scanner thread");
          debug_log("YARA scanner enabled - starting YARA scan thread...");
          scanner_threads.push(thread::spawn(|| {
              debug_log("YARA scanner thread started");
@@ -673,6 +707,7 @@ fn initialize_features(config: MonitorConfig) {
     }
 
     if config.iat_scan_enabled || config.manual_map_scan_enabled {
+        crash_logger::log_init_step("Starting IAT/manual map scanner thread");
         debug_log("IAT or manual map scan enabled - starting scanner thread...");
         let iat_enabled = config.iat_scan_enabled;
         let manual_map_enabled = config.manual_map_scan_enabled;
@@ -702,6 +737,7 @@ fn initialize_features(config: MonitorConfig) {
         THREAD_HANDLES.lock().unwrap().extend(scanner_threads);
     }
     
+    crash_logger::log_init_step("Feature initialization complete");
     debug_log("Feature initialization complete");
     log_event(LogLevel::Info, LogEvent::Initialization { status: "Feature initialization complete.".to_string() });
 }
@@ -710,90 +746,44 @@ fn initialize_features(config: MonitorConfig) {
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 
 /// Vectored Exception Handler to catch and log all crashes/exceptions
+/// Now uses crash_logger for comprehensive logging + MessageBox display
 unsafe extern "system" fn exception_handler(exception_info: *mut c_void) -> i32 {
+    use windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS;
+    
     if exception_info.is_null() {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    // Cast to pointers - exception_info points to a structure with two pointers
-    let exception_record_ptr = *(exception_info as *const *mut EXCEPTION_RECORD);
-    let context_record_ptr = *(exception_info.add(std::mem::size_of::<usize>()) as *const *mut CONTEXT);
+    // Cast to EXCEPTION_POINTERS
+    let exception_ptrs = exception_info as *mut EXCEPTION_POINTERS;
+    let exception_record_ptr = (*exception_ptrs).ExceptionRecord;
     
     if exception_record_ptr.is_null() {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    let exception_record = &*exception_record_ptr;
-    let exception_code = (*exception_record).ExceptionCode;
-    let exception_address = (*exception_record).ExceptionAddress;
-    let exception_flags = (*exception_record).ExceptionFlags;
-
-    // Get exception code name (cast to u32 to avoid overflow issues with NTSTATUS codes)
-    let exception_code_u32 = exception_code as u32;
-    let exception_name = match exception_code_u32 {
+    let exception_code = (*exception_record_ptr).ExceptionCode as u32;
+    
+    // Skip breakpoint and single-step exceptions (used by debuggers and our HW BPs)
+    // These are expected during normal hardware breakpoint operation
+    if exception_code == 0x80000003 || exception_code == 0x80000004 {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    
+    // Use crash_logger for comprehensive logging with MessageBox
+    crash_logger::log_crash(exception_ptrs);
+    
+    // Also try to log via the normal logging system if it's initialized
+    let exception_address = (*exception_record_ptr).ExceptionAddress;
+    let exception_name = match exception_code {
         0xC0000005 => "ACCESS_VIOLATION",
         0xC000001D => "ILLEGAL_INSTRUCTION",
         0xC0000094 => "INTEGER_DIVIDE_BY_ZERO",
-        0xC0000095 => "INTEGER_OVERFLOW",
         0xC0000096 => "PRIVILEGED_INSTRUCTION",
         0xC00000FD => "STACK_OVERFLOW",
-        0xC000008C => "ARRAY_BOUNDS_EXCEEDED",
-        0xC000008D => "FLOAT_DENORMAL_OPERAND",
-        0xC000008E => "FLOAT_DIVIDE_BY_ZERO",
-        0xC000008F => "FLOAT_INEXACT_RESULT",
-        0xC0000090 => "FLOAT_INVALID_OPERATION",
-        0xC0000091 => "FLOAT_OVERFLOW",
-        0xC0000092 => "FLOAT_STACK_CHECK",
-        0xC0000093 => "FLOAT_UNDERFLOW",
-        0x80000003 => "BREAKPOINT",
-        0x80000004 => "SINGLE_STEP",
         _ => "UNKNOWN_EXCEPTION",
     };
-
-    // Log to debug file immediately
-    let pid = GetCurrentProcessId();
-    let log_path = std::env::temp_dir().join(format!("monitor_lib_debug_{}.log", pid));
     
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-        let _ = writeln!(file, "\n========== EXCEPTION CAUGHT ==========");
-        let _ = writeln!(file, "[{}] Exception Code: 0x{:08X} ({})", timestamp, exception_code, exception_name);
-        let _ = writeln!(file, "[{}] Exception Address: {:?}", timestamp, exception_address);
-        let _ = writeln!(file, "[{}] Exception Flags: 0x{:08X}", timestamp, exception_flags);
-        
-        // Log context if available
-        if !context_record_ptr.is_null() {
-            #[cfg(target_arch = "x86_64")]
-            {
-                let ctx = &*context_record_ptr;
-                let _ = writeln!(file, "[{}] RIP: 0x{:016X}", timestamp, ctx.Rip);
-                let _ = writeln!(file, "[{}] RSP: 0x{:016X}", timestamp, ctx.Rsp);
-                let _ = writeln!(file, "[{}] RBP: 0x{:016X}", timestamp, ctx.Rbp);
-                let _ = writeln!(file, "[{}] RAX: 0x{:016X}", timestamp, ctx.Rax);
-                let _ = writeln!(file, "[{}] RBX: 0x{:016X}", timestamp, ctx.Rbx);
-                let _ = writeln!(file, "[{}] RCX: 0x{:016X}", timestamp, ctx.Rcx);
-                let _ = writeln!(file, "[{}] RDX: 0x{:016X}", timestamp, ctx.Rdx);
-            }
-        }
-        
-        // Try to get additional info for access violations
-        if exception_code_u32 == 0xC0000005 && (*exception_record).NumberParameters >= 2 {
-            let access_type = (*exception_record).ExceptionInformation[0];
-            let access_address = (*exception_record).ExceptionInformation[1];
-            let access_str = match access_type {
-                0 => "READ",
-                1 => "WRITE",
-                8 => "DEP_VIOLATION",
-                _ => "UNKNOWN",
-            };
-            let _ = writeln!(file, "[{}] Access Violation Type: {} at address 0x{:016X}", timestamp, access_str, access_address);
-        }
-        
-        let _ = writeln!(file, "======================================\n");
-        let _ = file.flush();
-    }
-
-    // Also try to log via the normal logging system if it's initialized
     if let Some(sender) = LOG_SENDER.get() {
         let entry = create_log_entry(
             LogLevel::Error,
@@ -847,26 +837,36 @@ pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserv
     let result = std::panic::catch_unwind(|| {
         match call_reason {
             DLL_PROCESS_ATTACH => {
-                debug_log("DllMain called with DLL_PROCESS_ATTACH.");
+                // Install panic hook FIRST - before anything else can crash
+                crash_logger::install_panic_hook();
+                crash_logger::early_debug_log("DllMain ATTACH - panic hook installed");
                 
-                // Install vectored exception handler FIRST to catch any crashes
+                debug_log("DllMain called with DLL_PROCESS_ATTACH.");
+                crash_logger::log_init_step("DllMain: DLL_PROCESS_ATTACH entered");
+                
+                // Install vectored exception handler SECOND to catch any crashes
                 unsafe {
+                    crash_logger::log_init_step("DllMain: Installing VEH");
                     let handler = AddVectoredExceptionHandler(
                         1, 
                         Some(std::mem::transmute(exception_handler as *const ()))
                     );
                     if handler.is_null() {
                         debug_log("WARNING: Failed to install vectored exception handler!");
+                        crash_logger::log_init_step("DllMain: VEH installation FAILED");
                     } else {
                         debug_log("Vectored exception handler installed successfully.");
+                        crash_logger::log_init_step("DllMain: VEH installed successfully");
                     }
                 }
                 
                 // Using a separate thread for initialization is crucial to avoid deadlocks
                 // inside DllMain, which is a highly restricted environment.
+                crash_logger::log_init_step("DllMain: Spawning initialization thread");
                 let init_thread = thread::spawn(main_initialization_thread);
                 THREAD_HANDLES.lock().unwrap().push(init_thread);
                 debug_log("Initialization thread spawned from DllMain.");
+                crash_logger::log_init_step("DllMain: Initialization thread spawned");
             }
             DLL_PROCESS_DETACH => {
                 debug_log("DllMain called with DLL_PROCESS_DETACH.");

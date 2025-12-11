@@ -113,27 +113,60 @@ pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION
 }
 
 pub unsafe fn initialize_stealth_hooks() {
+    crate::crash_logger::log_init_step("Stealth hooks: Starting initialization");
+    crate::crash_logger::log_hook("stealth_veh_handler", true, None, "Registering VEH handler");
+    
     // Register VEH
     let handle = AddVectoredExceptionHandler(1, Some(stealth_veh_handler));
     if handle.is_null() {
+        crate::crash_logger::log_hook("stealth_veh_handler", false, None, "VEH registration failed");
         log_event(LogLevel::Error, LogEvent::Error { 
             source: "StealthHooks".to_string(), 
             message: "Failed to register VEH".to_string() 
         });
         return;
     }
+    crate::crash_logger::log_hook("stealth_veh_handler", true, None, "VEH registered successfully");
 
-    // Apply proof-of-concept hook on NtQuerySystemInformation
+    // Get ntdll handle
+    crate::crash_logger::log_init_step("Stealth hooks: Getting ntdll.dll handle");
     let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
         widestring::U16CString::from_str("ntdll.dll").unwrap().as_ptr()
     );
     
     if ntdll != 0 {
+        crate::crash_logger::log_init_step(&format!("Stealth hooks: ntdll.dll at {:#x}", ntdll));
+        
+        // Hook NtQuerySystemInformation
+        crate::crash_logger::log_init_step("Stealth hooks: Resolving NtQuerySystemInformation");
         let func_name = b"NtQuerySystemInformation\0";
         if let Some(addr) = windows_sys::Win32::System::LibraryLoader::GetProcAddress(ntdll, func_name.as_ptr()) {
+            crate::crash_logger::log_hook(
+                "NtQuerySystemInformation", 
+                true, 
+                Some(addr as usize), 
+                "Function resolved, applying HW BP to all threads"
+            );
             apply_to_all_threads(addr as usize, 0);
+            crate::crash_logger::log_hook(
+                "NtQuerySystemInformation", 
+                true, 
+                Some(addr as usize), 
+                "HW BP applied to all threads"
+            );
+        } else {
+            crate::crash_logger::log_hook(
+                "NtQuerySystemInformation", 
+                false, 
+                None, 
+                "Failed to resolve function address"
+            );
         }
+    } else {
+        crate::crash_logger::log_init_step("Stealth hooks: FAILED to get ntdll.dll handle!");
     }
+    
+    crate::crash_logger::log_init_step("Stealth hooks: Initialization complete");
 }
 
 unsafe fn apply_to_all_threads(address: usize, dr_index: u8) {
@@ -142,23 +175,35 @@ unsafe fn apply_to_all_threads(address: usize, dr_index: u8) {
     };
     use windows_sys::Win32::System::Threading::{OpenThread, THREAD_ALL_ACCESS};
 
+    crate::crash_logger::log_init_step(&format!(
+        "Stealth hooks: apply_to_all_threads(addr={:#x}, dr={})", 
+        address, dr_index
+    ));
+    
     let pid = GetCurrentProcessId();
     let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        crate::crash_logger::log_init_step("Stealth hooks: CreateToolhelp32Snapshot FAILED");
         return;
     }
 
     let mut te: THREADENTRY32 = std::mem::zeroed();
     te.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
 
+    let mut thread_count = 0;
+    let mut success_count = 0;
+    
     if Thread32First(snapshot, &mut te) != 0 {
         loop {
             if te.th32OwnerProcessID == pid {
-                 let h_thread = OpenThread(THREAD_ALL_ACCESS, 0, te.th32ThreadID);
-                 if h_thread != 0 {
-                     apply_hw_bp_to_thread(h_thread, address, dr_index);
-                     windows_sys::Win32::Foundation::CloseHandle(h_thread);
-                 }
+                thread_count += 1;
+                let h_thread = OpenThread(THREAD_ALL_ACCESS, 0, te.th32ThreadID);
+                if h_thread != 0 {
+                    if apply_hw_bp_to_thread(h_thread, address, dr_index) {
+                        success_count += 1;
+                    }
+                    windows_sys::Win32::Foundation::CloseHandle(h_thread);
+                }
             }
             if Thread32Next(snapshot, &mut te) == 0 {
                 break;
@@ -166,4 +211,9 @@ unsafe fn apply_to_all_threads(address: usize, dr_index: u8) {
         }
     }
     windows_sys::Win32::Foundation::CloseHandle(snapshot);
+    
+    crate::crash_logger::log_init_step(&format!(
+        "Stealth hooks: Applied HW BP to {}/{} threads",
+        success_count, thread_count
+    ));
 }
