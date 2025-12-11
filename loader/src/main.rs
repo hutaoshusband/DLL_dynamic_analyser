@@ -13,17 +13,50 @@ use eframe::egui::{self, style::Widgets, Rounding, Stroke, Style, Visuals};
 use egui::Color32;
 
 fn main() -> Result<(), eframe::Error> {
+    // Create a custom icon programmatically (32x32 pixels)
+    let icon_size = 32;
+    let mut icon_data = vec![0u8; (icon_size * icon_size * 4) as usize];
+    
+    // Create a simple icon with a blue circle on dark background
+    for y in 0..icon_size {
+        for x in 0..icon_size {
+            let idx = ((y * icon_size + x) * 4) as usize;
+            let dx = x as f32 - icon_size as f32 / 2.0;
+            let dy = y as f32 - icon_size as f32 / 2.0;
+            let dist = (dx * dx + dy * dy).sqrt();
+            
+            if dist < 12.0 {
+                // Blue circle
+                icon_data[idx] = 51;      // R
+                icon_data[idx + 1] = 204; // G
+                icon_data[idx + 2] = 255; // B
+                icon_data[idx + 3] = 255; // A
+            } else {
+                // Dark background
+                icon_data[idx] = 30;      // R
+                icon_data[idx + 1] = 30;  // G
+                icon_data[idx + 2] = 46;  // B
+                icon_data[idx + 3] = 255; // A
+            }
+        }
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 700.0])
             .with_resizable(true)
             .with_transparent(true)
-            .with_decorations(false),
+            .with_decorations(false)
+            .with_icon(egui::IconData {
+                rgba: icon_data,
+                width: icon_size,
+                height: icon_size,
+            }),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Modular Dynamic Analyzer",
+        "DLL-Analyzer by HUTAOSHUSBAND 1.0.2",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_style(create_custom_style());

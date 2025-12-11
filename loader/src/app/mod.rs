@@ -240,7 +240,7 @@ impl eframe::App for App {
 
                     // Window Controls (Min, Max, Close)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let button_size = [40.0, 40.0];
+                        let button_size = [24.0, 24.0];
                         
                         // Close
                         if ui.add_sized(button_size, egui::Button::new("❌")).clicked() {
