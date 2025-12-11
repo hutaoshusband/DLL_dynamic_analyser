@@ -6,6 +6,22 @@ use shared::logging::{LogEvent, LogLevel};
 use egui::{Align, Color32, Frame, Layout};
 
 pub fn render_log_tab(ui: &mut Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        if ui.button("Export to JSON").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .set_file_name("analysis_report.json")
+                .save_file()
+            {
+                if let Ok(json) = serde_json::to_string_pretty(&state.logs) {
+                    if let Err(e) = std::fs::write(path, json) {
+                        eprintln!("Failed to write log file: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
     // Center the terminal-like view
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         let terminal_frame = Frame::central_panel(&ui.style())

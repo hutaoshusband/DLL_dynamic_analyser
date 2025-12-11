@@ -187,9 +187,38 @@ impl eframe::App for App {
                         }
                     }
 
+<<<<<<< Updated upstream
                     // Window Controls (Min, Max, Close)
+=======
+                    // --- Render Ripples ---
+                    let current_time = ctx.input(|i| i.time);
+                    state.active_ripples.retain(|ripple| {
+                        let elapsed = current_time - ripple.start_time;
+                        let duration = 0.6; // 600ms animation
+                        if elapsed >= duration {
+                            false
+                        } else {
+                            let t = elapsed as f32 / duration as f32;
+                            let radius = t * 150.0; // Max radius 150
+                            let opacity = (1.0 - t).powi(2); // Quadratic ease-out or just squared falloff for faster fade
+                            
+                            // Use a separate painter to draw on top of everything in this layer
+                             ui.ctx().layer_painter(ui.layer_id()).circle_filled(
+                                ripple.center,
+                                radius,
+                                ripple.color.linear_multiply(opacity),
+                            );
+                            true
+                        }
+                    });
+
+                    if !state.active_ripples.is_empty() {
+                        ctx.request_repaint();
+                    }
+
+>>>>>>> Stashed changes
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let button_size = [40.0, 40.0];
+                        let button_size = [24.0, 24.0];
                         
                         // Close
                         if ui.add_sized(button_size, egui::Button::new("❌")).clicked() {

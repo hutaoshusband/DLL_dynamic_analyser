@@ -13,17 +13,30 @@ use eframe::egui::{self, style::Widgets, Rounding, Stroke, Style, Visuals};
 use egui::Color32;
 
 fn main() -> Result<(), eframe::Error> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1000.0, 700.0])
+        .with_resizable(true)
+        .with_transparent(true)
+        .with_decorations(false);
+
+    if let Ok(image) = image::open("icon.ico") {
+        let image = image.into_rgba8();
+        let (width, height) = image.dimensions();
+        let icon_data = egui::IconData {
+            rgba: image.into_raw(),
+            width,
+            height,
+        };
+        viewport = viewport.with_icon(icon_data);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 700.0])
-            .with_resizable(true)
-            .with_transparent(true)
-            .with_decorations(false),
+        viewport,
         ..Default::default()
     };
 
     eframe::run_native(
-        "Modular Dynamic Analyzer",
+        "DLL-Analyzer by HUTAOSHUSBAND 1.0.2",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_style(create_custom_style());

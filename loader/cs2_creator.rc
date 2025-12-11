@@ -4,3 +4,6 @@
 // 24: The resource type for an application manifest (RT_MANIFEST).
 // "cs2_creator.manifest": The path to the manifest file to embed.
 1 24 "cs2_creator.manifest"
+// Add the application icon
+// ID_ICON ICON "icon.ico"
+101 ICON "icon.ico"
