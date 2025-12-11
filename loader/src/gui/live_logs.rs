@@ -37,7 +37,13 @@ pub fn render_log_tab(ui: &mut Ui, state: &mut AppState) {
                         if *count > 1 {
                             log_text = format!("({}x) {}", count, log_text);
                         }
-                        ui.colored_label(color, log_text);
+                        
+                        ui.horizontal(|ui| {
+                            if log.origin_suspicious {
+                                ui.colored_label(Color32::from_rgb(255, 0, 0), "💀");
+                            }
+                            ui.colored_label(color, log_text);
+                        });
                     }
                 });
         });

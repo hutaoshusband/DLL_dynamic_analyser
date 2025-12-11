@@ -87,6 +87,37 @@ pub fn render_hooking_controls_tab(ui: &mut Ui, state: &mut AppState) {
 
         ui.add_space(10.0);
 
+        // Card for YARA Scanning
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                ui.heading("YARA Scanning");
+                ui.add_space(12.0);
+                if ui.add_enabled(is_running, egui::Button::new("Load YARA Rules (.yar)")).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("YARA Rules", &["yar", "yara"]).pick_file() {
+                        if let Ok(rules_str) = std::fs::read_to_string(path) {
+                            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
+                                let command = Command::LoadYaraRules(rules_str);
+                                if let Ok(command_json) = serde_json::to_string(&command) {
+                                    let command_to_send = format!("{}\n", command_json);
+                                    unsafe {
+                                        windows_sys::Win32::Storage::FileSystem::WriteFile(
+                                            pipe_handle,
+                                            command_to_send.as_ptr(),
+                                            command_to_send.len() as u32,
+                                            &mut 0,
+                                            std::ptr::null_mut(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
         // Card for Individual Hooks
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {

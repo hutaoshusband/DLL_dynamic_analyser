@@ -16,6 +16,9 @@ mod scanner;
 mod security;
 mod string_dumper;
 mod vmp_dumper;
+#[cfg(feature = "use_yara")]
+mod yara_scanner;
+
 use crate::config::CONFIG;
 use crate::hooks::{cpprest_hook, winapi_hooks};
 use crate::logging::create_log_entry;
@@ -355,6 +358,24 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
                     Ok(Command::DumpModule { module_name }) => {
                         handle_dump_module(&module_name);
                     }
+                    Ok(Command::LoadYaraRules(rules_str)) => {
+                        #[cfg(feature = "use_yara")]
+                        {
+                            debug_log("Compiling YARA rules...");
+                            match crate::yara_scanner::SCANNER.lock().unwrap().compile_rules(&rules_str) {
+                                Ok(_) => debug_log("YARA rules compiled."),
+                                Err(e) => log_event(LogLevel::Error, LogEvent::Error { 
+                                    source: "YaraScanner".to_string(), 
+                                    message: format!("Failed to compile rules: {}", e) 
+                                }),
+                            }
+                        }
+                        #[cfg(not(feature = "use_yara"))]
+                        log_event(LogLevel::Error, LogEvent::Error { 
+                            source: "YaraScanner".to_string(), 
+                            message: "YARA feature not enabled in build.".to_string() 
+                        });
+                    }
                     Err(e) => debug_log(&format!("Failed to parse command: '{}', error: {}", command_str, e)),
                 }
             }
@@ -616,6 +637,12 @@ fn initialize_features(config: MonitorConfig) {
         debug_log("Spawning CPP REST hook thread...");
         thread::spawn(cpprest_hook::initialize_and_enable_hook);
         debug_log("CPP REST hook thread spawned");
+
+        debug_log("Initializing stealth hooks (Hardware Breakpoints)...");
+        unsafe {
+            crate::hooks::stealth_hooks::initialize_stealth_hooks();
+        }
+        debug_log("Stealth hooks initialized.");
     } else {
         debug_log("API hooks disabled in config");
     }
@@ -629,6 +656,22 @@ fn initialize_features(config: MonitorConfig) {
         debug_log("String dump enabled - starting string dumper...");
         scanner_threads.push(thread::spawn(string_dumper::start_string_dumper));
     }
+
+    #[cfg(feature = "use_yara")]
+    {
+         debug_log("YARA scanner enabled - starting YARA scan thread...");
+         scanner_threads.push(thread::spawn(|| {
+             debug_log("YARA scanner thread started");
+             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
+                 {
+                     let scanner = crate::yara_scanner::SCANNER.lock().unwrap();
+                     scanner.scan_memory();
+                 }
+                 thread::sleep(Duration::from_secs(30));
+             }
+         }));
+    }
+
     if config.iat_scan_enabled || config.manual_map_scan_enabled {
         debug_log("IAT or manual map scan enabled - starting scanner thread...");
         let iat_enabled = config.iat_scan_enabled;

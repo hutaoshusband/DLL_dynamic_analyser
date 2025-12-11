@@ -84,6 +84,7 @@ pub struct LogEntry {
     pub event: LogEvent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack_trace: Option<Vec<String>>,
+    pub origin_suspicious: bool,
 }
 
 // Custom PartialEq for deduplication logic in the loader
@@ -104,6 +105,7 @@ impl LogEntry {
             suspicion_score: 0,
             event,
             stack_trace: None,
+            origin_suspicious: false,
         }
     }
 }

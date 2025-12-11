@@ -29,6 +29,7 @@ pub enum Command {
     CalculateEntropy { module_name: String, name: String },
     UpdateConfig(MonitorConfig),
     DumpModule { module_name: String },
+    LoadYaraRules(String),
 }
 
 // This macro simplifies the creation and maintenance of the MonitorConfig struct.
