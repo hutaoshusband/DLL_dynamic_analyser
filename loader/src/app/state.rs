@@ -12,6 +12,7 @@ use shared::{
     logging::{LogEntry, LogEvent, LogLevel, SectionInfo},
     MonitorConfig, Preset,
 };
+use eframe::egui::{Pos2, Color32};
 pub const DLL_NAME: &str = "client.dll";
 
 #[derive(Clone, Debug)]
@@ -30,6 +31,13 @@ pub enum ActiveTab {
     MemoryAnalysis,
     Hooking,
     Network,
+}
+
+#[derive(Clone, Debug)]
+pub struct RippleAnimation {
+    pub start_time: f64,
+    pub center: Pos2,
+    pub color: Color32,
 }
 
 pub struct AppState {
@@ -55,6 +63,9 @@ pub struct AppState {
     pub auto_inject_enabled: Arc<AtomicBool>,
     pub auto_inject_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
     pub use_manual_map: bool,
+    pub active_ripples: Vec<RippleAnimation>,
+    pub previous_tab: Option<ActiveTab>,
+    pub tab_transition_start: Option<f64>,
 }
 
 impl AppState {
@@ -97,6 +108,9 @@ impl AppState {
             auto_inject_enabled: Arc::new(AtomicBool::new(false)),
             auto_inject_thread: Arc::new(Mutex::new(None)),
             use_manual_map: false,
+            active_ripples: Vec::new(),
+            previous_tab: None,
+            tab_transition_start: None,
         }
     }
 
