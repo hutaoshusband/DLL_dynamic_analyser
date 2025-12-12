@@ -29,6 +29,12 @@ pub struct App {
     log_receiver: mpsc::Receiver<String>,
     is_maximized: bool,
     last_window_rect: Option<egui::Rect>,
+    
+    // Animation
+    startup_time: Option<f64>,
+    animation_finished: bool,
+    frame_count: usize,
+    startup_target_rect: Option<egui::Rect>,
 }
 
 impl App {
@@ -39,6 +45,10 @@ impl App {
             log_receiver,
             is_maximized: false,
             last_window_rect: None,
+            startup_time: None,
+            animation_finished: false,
+            frame_count: 0,
+            startup_target_rect: None,
         }
     }
 }
@@ -74,9 +84,99 @@ impl eframe::App for App {
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+        // --- Startup Animation ---
+        
+        // 1. Determine Target Resolution (Once and Cache)
+        if self.startup_target_rect.is_none() {
+             let mut screen_rect = ctx.input(|i| i.screen_rect());
+             
+             // Sanity check: If screen_rect is suspiciously small (uninitialized or failed), try fallback.
+             if screen_rect.width() < 800.0 || screen_rect.height() < 600.0 {
+                  if let Some(vp_rect) = ctx.input(|i| i.viewport().outer_rect) {
+                      if vp_rect.width() > 800.0 {
+                           screen_rect = vp_rect;
+                      } else {
+                           screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                      }
+                  } else {
+                       screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                  }
+             }
 
-        // --- Window Management Logic ---
+             // Define a target window size (e.g., 1200x800), but don't exceed screen size
+             let target_w = 1200.0f32.min(screen_rect.width() * 0.9);
+             let target_h = 800.0f32.min(screen_rect.height() * 0.9);
+             let target_size = egui::vec2(target_w, target_h);
+             
+             let center = screen_rect.center();
+             let target_pos = center - target_size / 2.0;
+             
+             let candidate = egui::Rect::from_min_size(target_pos, target_size);
 
+             // Store the determined target.
+             self.startup_target_rect = Some(candidate);
+        }
+        
+        // Use the cached target for stability
+        let target_final_rect = self.startup_target_rect.unwrap();
+
+        // 0. Warmup phase: Wait for a few frames to let the OS/Window Monitor info stabilize
+        self.frame_count += 1;
+        if self.frame_count < 10 { // Increased warmup to 10 frames to be safe
+             // Force "Start" state during warmup
+             let start_w = 10.0; // Start REALLY small as requested ("fast nichts")
+             let start_h = 10.0;
+             // Start from the center of the TARGET rect (which is center of screen)
+             let center = target_final_rect.center(); 
+             let start_pos = center - egui::vec2(start_w, start_h) / 2.0;
+
+             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([start_w, start_h].into()));
+             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(start_pos));
+             
+             ctx.request_repaint();
+        } else if !self.animation_finished {
+             let now = ctx.input(|i| i.time);
+             
+             // Initialize start time on the first valid frame
+             if self.startup_time.is_none() {
+                 self.startup_time = Some(now);
+             }
+             
+             let start = self.startup_time.unwrap();
+             let duration = 0.6; // 600ms
+             let t_raw = ((now - start) / duration).clamp(0.0, 1.0) as f32;
+             
+             // Cubic Ease Out
+             let t = 1.0 - (1.0 - t_raw).powi(3);
+
+             if t_raw >= 1.0 {
+                 self.animation_finished = true;
+                 
+                 // Finalize: Windowed Mode (Centered)
+                 self.is_maximized = false; 
+                 
+                 // Apply final state
+                 ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_final_rect.min));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_final_rect.size()));
+             } else {
+                  // Animation Step
+                 let center = target_final_rect.center();
+                 let target_size = target_final_rect.size();
+                 
+                 // "Almost nothing" (10px) to Target Size
+                 let start_size = egui::vec2(10.0, 10.0);
+                 
+                 let current_size = start_size + (target_size - start_size) * t;
+                 let current_pos = center - current_size / 2.0;
+
+                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(current_size));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(current_pos));
+                 
+                 ctx.request_repaint();
+             }
+        }
+        
         // 1. Detect OS Maximize attempt (e.g. Win+Up) and switch to custom maximize
         if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
@@ -95,10 +195,10 @@ impl eframe::App for App {
         }
 
         // 2. Track window size when not maximized (for restore)
-        if !self.is_maximized {
-            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+        if !self.is_maximized && self.animation_finished {
+             if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
                 self.last_window_rect = Some(rect);
-            }
+             }
         }
 
         // Helper for toggling maximize state
@@ -264,6 +364,15 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
+                // Optimize: Don't render complex UI during the heavy window resize animation
+                // This prevents the "extreme lag" caused by re-layouting every frame.
+                if !self.animation_finished {
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner(); // Optional: Show a small spinner or nothing
+                    });
+                    return;
+                }
+
                 // Add a separator and space for visual clarity
                 ui.add(egui::Separator::default().spacing(10.0));
 

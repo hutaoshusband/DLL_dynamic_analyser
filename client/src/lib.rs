@@ -585,6 +585,10 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
     // Drop the read lock so other threads can access the config.
     drop(config);
 
+    // Prevent the logger thread from triggering its own hooks (e.g., when calling WriteFile).
+    // By holding this guard, any hook called by this thread will see IN_HOOK=true and skip logging.
+    let _guard = ReentrancyGuard::new();
+
     while let Ok(Some(log_entry)) = receiver.recv() {
         // Always send to the pipe if it's valid
         if pipe_handle != INVALID_HANDLE_VALUE {
@@ -657,23 +661,26 @@ fn initialize_features(config: MonitorConfig) {
         unsafe {
             winapi_hooks::initialize_all_hooks();
         }
-        crash_logger::log_init_step("winapi_hooks::initialize_all_hooks() completed");
-        debug_log("WinAPI hooks initialized successfully");
+                
+                crash_logger::log_init_step("winapi_hooks::initialize_all_hooks() completed");
+                debug_log("WinAPI hooks initialized successfully");
+                
+                /*
+                crash_logger::log_init_step("Spawning CPP REST hook thread");
+                debug_log("Spawning CPP REST hook thread...");
+                thread::spawn(cpprest_hook::initialize_and_enable_hook);
+                crash_logger::log_init_step("CPP REST hook thread spawned");
+                debug_log("CPP REST hook thread spawned");
         
-        crash_logger::log_init_step("Spawning CPP REST hook thread");
-        debug_log("Spawning CPP REST hook thread...");
-        thread::spawn(cpprest_hook::initialize_and_enable_hook);
-        crash_logger::log_init_step("CPP REST hook thread spawned");
-        debug_log("CPP REST hook thread spawned");
-
-        crash_logger::log_init_step("About to initialize stealth hooks (Hardware Breakpoints)");
-        debug_log("Initializing stealth hooks (Hardware Breakpoints)...");
-        unsafe {
-            crate::hooks::stealth_hooks::initialize_stealth_hooks();
-        }
-        crash_logger::log_init_step("Stealth hooks initialization returned");
-        debug_log("Stealth hooks initialized.");
-    } else {
+                crash_logger::log_init_step("About to initialize stealth hooks (Hardware Breakpoints)");
+                debug_log("Initializing stealth hooks (Hardware Breakpoints)...");
+                unsafe {
+                    crate::hooks::stealth_hooks::initialize_stealth_hooks();
+                }
+                crash_logger::log_init_step("Stealth hooks initialization returned");
+                debug_log("Stealth hooks initialized.");
+                */
+            } else {
         crash_logger::log_init_step("API hooks disabled in config");
         debug_log("API hooks disabled in config");
     }

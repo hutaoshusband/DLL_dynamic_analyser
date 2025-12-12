@@ -307,7 +307,7 @@ pub unsafe fn hooked_nt_query_information_process(
                     parameters: json!({
                         "process_handle": process_handle as usize,
                         "class": "ProcessDebugPort",
-                        "note": "Anti-debugging check detected. Modifying return value.",
+                        "note": "Anti-debugging check detected.",
                     }),
                     stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
                 },
@@ -1934,6 +1934,7 @@ pub unsafe fn initialize_all_hooks() {
         );
     }
 
+    /*
     if config.hook_create_file_w {
         hook!(CreateFileWHook, CreateFileW, |a, b, c, d, e, f, g| {
             hooked_create_file_w(a, b, c, d, e, f, g)
@@ -1944,6 +1945,7 @@ pub unsafe fn initialize_all_hooks() {
             hooked_write_file(a, b, c, d, e)
         });
     }
+    */
     if config.hook_create_process_w {
         hook!(CreateProcessWHook, CreateProcessW, hooked_create_process_w);
     }
