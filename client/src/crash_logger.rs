@@ -30,6 +30,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
+use crate::ReentrancyGuard;
 
 // ============================================================================
 // Global State
@@ -378,6 +379,9 @@ fn get_module_for_address(addr: usize) -> Option<(String, usize, usize)> {
 
 /// Write a message to a log file
 fn log_to_file(log_type: &str, message: &str) {
+    // Prevent recursive logging if we hooked CreateFile/WriteFile
+    let _guard = ReentrancyGuard::new();
+
     let log_dir = get_log_dir();
     let pid = unsafe { GetCurrentProcessId() };
     let timestamp = Local::now().format("%Y%m%d_%H%M%S");
@@ -423,6 +427,7 @@ fn show_crash_message_box(title: &str, message: &str) {
 
 /// Early debug log to temp directory (for use before crash_logger is fully initialized)
 pub fn early_debug_log(message: &str) {
+    let _guard = ReentrancyGuard::new();
     let pid = unsafe { GetCurrentProcessId() };
     let log_path = std::env::temp_dir().join(format!("analyzer_early_debug_{}.log", pid));
     

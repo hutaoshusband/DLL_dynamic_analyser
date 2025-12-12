@@ -1934,6 +1934,7 @@ pub unsafe fn initialize_all_hooks() {
         );
     }
 
+    /*
     if config.hook_create_file_w {
         hook!(CreateFileWHook, CreateFileW, |a, b, c, d, e, f, g| {
             hooked_create_file_w(a, b, c, d, e, f, g)
@@ -1944,6 +1945,7 @@ pub unsafe fn initialize_all_hooks() {
             hooked_write_file(a, b, c, d, e)
         });
     }
+    */
     if config.hook_create_process_w {
         hook!(CreateProcessWHook, CreateProcessW, hooked_create_process_w);
     }
