@@ -15,7 +15,6 @@
 *.log
 *.so
 *.dll
-*.exe
 *.o
 *.a
 *.lib
