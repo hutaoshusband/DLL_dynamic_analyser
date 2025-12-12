@@ -371,6 +371,7 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
                     Ok(Command::ListSections { module_name }) => handle_list_sections(&module_name),
                     Ok(Command::DumpSection { module_name, name }) => handle_dump_section(&module_name, &name),
                     Ok(Command::CalculateEntropy { module_name, name }) => handle_calculate_entropy(&module_name, &name),
+                    Ok(Command::CalculateFullEntropy { module_name }) => handle_calculate_full_entropy(&module_name),
                     Ok(Command::UpdateConfig(new_config)) => {
                         debug_log(&format!("Updating config: {:?}", new_config));
                         let mut config_guard = CONFIG.features.write().unwrap();
@@ -510,6 +511,27 @@ fn handle_calculate_entropy(module_name: &str, section_name: &str) {
                 }
             }
         }
+    });
+}
+
+fn handle_calculate_full_entropy(module_name: &str) {
+    debug_log(&format!("Handling CalculateFullEntropy for module: {}", module_name));
+    with_pe_file("handle_calculate_full_entropy", module_name, |file, base| {
+        // Calculate entropy across the entire module image
+        let image_size = file.optional_header().SizeOfImage as usize;
+        let data = unsafe {
+            std::slice::from_raw_parts(base as *const u8, image_size)
+        };
+        
+        const CHUNK_SIZE: usize = 256;
+        let entropy: Vec<f32> = data.chunks(CHUNK_SIZE)
+            .map(|chunk| shannon_entropy(chunk))
+            .collect();
+        
+        log_event(LogLevel::Info, LogEvent::FullEntropyResult {
+            module_name: module_name.to_string(),
+            entropy,
+        });
     });
 }
 

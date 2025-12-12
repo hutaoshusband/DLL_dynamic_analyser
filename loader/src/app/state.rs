@@ -40,6 +40,14 @@ pub struct RippleAnimation {
     pub color: Color32,
 }
 
+#[derive(Clone, Debug)]
+pub struct YaraMatchInfo {
+    pub rule_name: String,
+    pub address: usize,
+    pub region_size: usize,
+    pub metadata: String,
+}
+
 pub struct AppState {
     pub target_process_name: String,
     pub manual_injection_pid: String,
@@ -57,6 +65,8 @@ pub struct AppState {
     pub sections: Arc<Mutex<Vec<SectionInfo>>>,
     pub selected_section_name: Option<String>,
     pub entropy_results: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    pub full_entropy_results: Arc<Mutex<Option<(String, Vec<f32>)>>>,
+    pub yara_matches: Arc<Mutex<Vec<YaraMatchInfo>>>,
     pub selected_preset: Preset,
     pub monitor_config: MonitorConfig,
     pub active_tab: ActiveTab,
@@ -102,6 +112,8 @@ impl AppState {
             sections: Arc::new(Mutex::new(Vec::new())),
             selected_section_name: None,
             entropy_results: Arc::new(Mutex::new(HashMap::new())),
+            full_entropy_results: Arc::new(Mutex::new(None)),
+            yara_matches: Arc::new(Mutex::new(Vec::new())),
             selected_preset: default_preset,
             monitor_config,
             active_tab: ActiveTab::Launcher,
@@ -139,6 +151,17 @@ impl AppState {
                             .lock()
                             .unwrap()
                             .insert(name.clone(), entropy.clone());
+                    }
+                    LogEvent::FullEntropyResult { module_name, entropy } => {
+                        *self.full_entropy_results.lock().unwrap() = Some((module_name.clone(), entropy.clone()));
+                    }
+                    LogEvent::YaraMatch { rule_name, address, region_size, metadata } => {
+                        self.yara_matches.lock().unwrap().push(YaraMatchInfo {
+                            rule_name: rule_name.clone(),
+                            address: *address,
+                            region_size: *region_size,
+                            metadata: metadata.clone(),
+                        });
                     }
                     _ => {}
                 }

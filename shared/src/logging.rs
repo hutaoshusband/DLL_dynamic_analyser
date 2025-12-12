@@ -60,6 +60,8 @@ pub enum LogEvent {
     StaticAnalysis { finding: String, details: String },
     StringDump { address: usize, value: String, encoding: String },
     UnpackerActivity { source_address: usize, finding: String, details: String },
+    FullEntropyResult { module_name: String, entropy: Vec<f32> },
+    YaraMatch { rule_name: String, address: usize, region_size: usize, metadata: String },
     // Loader-specific variant
     Message(String),
 }

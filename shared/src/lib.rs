@@ -32,6 +32,7 @@ pub enum Command {
     ListSections { module_name: String },
     DumpSection { module_name: String, name: String },
     CalculateEntropy { module_name: String, name: String },
+    CalculateFullEntropy { module_name: String },
     UpdateConfig(MonitorConfig),
     DumpModule { module_name: String },
     LoadYaraRules(String),
