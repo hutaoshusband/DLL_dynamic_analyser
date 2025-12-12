@@ -88,27 +88,37 @@ impl eframe::App for App {
         
         // 1. Determine Target Resolution (Once and Cache)
         if self.startup_target_rect.is_none() {
-             let mut candidate = ctx.input(|i| i.screen_rect());
-             // Sanity check: If screen_rect is suspiciously small (uninitialized or failed), ignore it.
-             if candidate.width() < 800.0 || candidate.height() < 600.0 {
-                  // Check if viewport is already large (e.g. started maximized externally)
+             let mut screen_rect = ctx.input(|i| i.screen_rect());
+             
+             // Sanity check: If screen_rect is suspiciously small (uninitialized or failed), try fallback.
+             if screen_rect.width() < 800.0 || screen_rect.height() < 600.0 {
                   if let Some(vp_rect) = ctx.input(|i| i.viewport().outer_rect) {
                       if vp_rect.width() > 800.0 {
-                           candidate = vp_rect;
+                           screen_rect = vp_rect;
                       } else {
-                           // Default to 1920x1080 if we have no clue
-                           candidate = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                           screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
                       }
                   } else {
-                       candidate = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                       screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
                   }
              }
+
+             // Define a target window size (e.g., 1200x800), but don't exceed screen size
+             let target_w = 1200.0f32.min(screen_rect.width() * 0.9);
+             let target_h = 800.0f32.min(screen_rect.height() * 0.9);
+             let target_size = egui::vec2(target_w, target_h);
+             
+             let center = screen_rect.center();
+             let target_pos = center - target_size / 2.0;
+             
+             let candidate = egui::Rect::from_min_size(target_pos, target_size);
+
              // Store the determined target.
              self.startup_target_rect = Some(candidate);
         }
         
         // Use the cached target for stability
-        let target_max_rect = self.startup_target_rect.unwrap();
+        let target_final_rect = self.startup_target_rect.unwrap();
 
         // 0. Warmup phase: Wait for a few frames to let the OS/Window Monitor info stabilize
         self.frame_count += 1;
@@ -116,15 +126,14 @@ impl eframe::App for App {
              // Force "Start" state during warmup
              let start_w = 10.0; // Start REALLY small as requested ("fast nichts")
              let start_h = 10.0;
-             let center = target_max_rect.center();
+             // Start from the center of the TARGET rect (which is center of screen)
+             let center = target_final_rect.center(); 
              let start_pos = center - egui::vec2(start_w, start_h) / 2.0;
 
              ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([start_w, start_h].into()));
              ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(start_pos));
              
              ctx.request_repaint();
-             // Do NOT return; let the UI render (even if crushed) to ensure the backend is alive.
-             // We can optionally suppress drawing content if it looks bad:
         } else if !self.animation_finished {
              let now = ctx.input(|i| i.time);
              
@@ -143,20 +152,19 @@ impl eframe::App for App {
              if t_raw >= 1.0 {
                  self.animation_finished = true;
                  
-                 // Finalize Maximize
-                 self.is_maximized = true; // Updates logic state
+                 // Finalize: Windowed Mode (Centered)
+                 self.is_maximized = false; 
                  
-                 // Apply final maximized state (Custom Transparent Maximize)
+                 // Apply final state
                  ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
-                 let safe_rect = egui::Rect::from_min_size(target_max_rect.min, target_max_rect.size() - egui::vec2(0.0, 1.0));
-                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(safe_rect.min));
-                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(safe_rect.size()));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_final_rect.min));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_final_rect.size()));
              } else {
                   // Animation Step
-                 let center = target_max_rect.center();
-                 let target_size = target_max_rect.size();
+                 let center = target_final_rect.center();
+                 let target_size = target_final_rect.size();
                  
-                 // "Almost nothing" (10px) to Full Size
+                 // "Almost nothing" (10px) to Target Size
                  let start_size = egui::vec2(10.0, 10.0);
                  
                  let current_size = start_size + (target_size - start_size) * t;
