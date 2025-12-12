@@ -1,3 +1,5 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
+
 use eframe::egui::{self, Ui};
 
 use crate::app::state::AppState;
@@ -6,7 +8,6 @@ use shared::logging::{LogEvent, LogLevel};
 use egui::{Align, Color32, Frame, Layout};
 
 pub fn render_log_tab(ui: &mut Ui, state: &mut AppState) {
-    // Center the terminal-like view
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         let terminal_frame = Frame::central_panel(&ui.style())
             .fill(Color32::from_rgb(10, 10, 15)) // Darker, terminal-like background
@@ -115,7 +116,7 @@ fn format_log_event(event: &LogEvent) -> String {
             format!("Full entropy for '{}': avg {:.2} ({} chunks)", module_name, avg, entropy.len())
         }
         LogEvent::YaraMatch { rule_name, address, region_size, .. } => {
-            format!("YARA Match: {} @ {:#x} (size: {:#x})", rule_name, address, region_size)
+            format!("🔍 YARA Match: {} @ {:#x} (size: {:#x})", rule_name, address, region_size)
         }
     }
 }

@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
@@ -13,11 +12,9 @@ use eframe::egui::{self, style::Widgets, Rounding, Stroke, Style, Visuals};
 use egui::Color32;
 
 fn main() -> Result<(), eframe::Error> {
-    // Create a custom icon programmatically (32x32 pixels)
     let icon_size = 32;
     let mut icon_data = vec![0u8; (icon_size * icon_size * 4) as usize];
     
-    // Create a simple icon with a blue circle on dark background
     for y in 0..icon_size {
         for x in 0..icon_size {
             let idx = ((y * icon_size + x) * 4) as usize;
@@ -26,13 +23,11 @@ fn main() -> Result<(), eframe::Error> {
             let dist = (dx * dx + dy * dy).sqrt();
             
             if dist < 12.0 {
-                // Blue circle
                 icon_data[idx] = 51;      // R
                 icon_data[idx + 1] = 204; // G
                 icon_data[idx + 2] = 255; // B
                 icon_data[idx + 3] = 255; // A
             } else {
-                // Dark background
                 icon_data[idx] = 30;      // R
                 icon_data[idx + 1] = 30;  // G
                 icon_data[idx + 2] = 46;  // B

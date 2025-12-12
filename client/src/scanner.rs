@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 #![allow(dead_code, unused_variables)]
@@ -25,7 +24,6 @@ use windows_sys::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_TLS_DIR
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
-/// Converts a fixed-size null-padded UTF-16 array to a Rust String.
 fn u16_array_to_string(arr: &[u16]) -> String {
     let len = arr.iter().position(|&c| c == 0).unwrap_or(arr.len());
     OsString::from_wide(&arr[..len])
@@ -33,14 +31,9 @@ fn u16_array_to_string(arr: &[u16]) -> String {
         .into_owned()
 }
 
-/// Enumerates all loaded modules in the current process.
-/// For each module, it returns its full path and a slice of its memory.
-/// This is unsafe because it creates a slice from a raw pointer with a lifetime of 'static.
-/// The caller must ensure this slice is only used while the module is loaded in memory.
 pub unsafe fn enumerate_modules() -> Vec<(String, &'static [u8])> {
     let mut modules = Vec::new();
     let process_id = GetCurrentProcessId();
-    // TH32CS_SNAPMODULE32 is needed even for 64-bit processes to get all modules.
     let snapshot_handle =
         CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id);
 
@@ -80,8 +73,6 @@ pub unsafe fn enumerate_modules() -> Vec<(String, &'static [u8])> {
     modules
 }
 
-/// Gets a slice representing the memory of the main executable module.
-/// This is unsafe because it involves reading directly from memory based on PE header information.
 pub unsafe fn get_main_module_range() -> Option<&'static [u8]> {
     let base_addr = GetModuleHandleW(std::ptr::null_mut()) as *const u8;
     if base_addr.is_null() {
@@ -89,14 +80,12 @@ pub unsafe fn get_main_module_range() -> Option<&'static [u8]> {
     }
     let dos_header = &*(base_addr as *const IMAGE_DOS_HEADER);
     if dos_header.e_magic != 0x5A4D {
-        // "MZ"
         return None;
     }
     let nt_headers_ptr =
         base_addr.add(dos_header.e_lfanew as usize) as *const IMAGE_NT_HEADERS64;
     let nt_headers = &*nt_headers_ptr;
     if nt_headers.Signature != 0x4550 {
-        // "PE\0\0"
         return None;
     }
     let size_of_image = nt_headers.OptionalHeader.SizeOfImage;
@@ -106,7 +95,6 @@ pub unsafe fn get_main_module_range() -> Option<&'static [u8]> {
     ))
 }
 
-/// A simple wrapper around patternscan::scan to find a signature in the main module.
 pub fn find_signature(signature: &str) -> Option<usize> {
     unsafe {
         if let Some(module_slice) = get_main_module_range() {
@@ -189,7 +177,6 @@ pub fn scan_for_manual_mapping() {
     }
 }
 
-/// Scans the PE header of a given module for TLS callbacks.
 pub unsafe fn scan_tls_callbacks(module_base: usize) {
     let dos_header = &*(module_base as *const IMAGE_DOS_HEADER);
     if dos_header.e_magic != 0x5A4D {
@@ -208,7 +195,6 @@ pub unsafe fn scan_tls_callbacks(module_base: usize) {
         (module_base + tls_dir_entry.VirtualAddress as usize) as *const IMAGE_TLS_DIRECTORY64;
     let mut callback_addr = (*tls_dir).AddressOfCallBacks as *const usize;
 
-    // Callbacks are stored in a null-terminated array of pointers.
     if callback_addr.is_null() {
         return;
     }
@@ -228,13 +214,6 @@ pub unsafe fn scan_tls_callbacks(module_base: usize) {
     }
 }
 
-/// Scans a module's PE headers for section names characteristic of VMProtect.
-///
-/// # Arguments
-///
-/// * `module_path` - The path of the module being scanned, for logging.
-/// * `module_base` - The base address of the module in memory.
-///
 pub unsafe fn scan_for_vmp_sections(module_path: &str, module_base: usize) {
     let dos_header = &*(module_base as *const IMAGE_DOS_HEADER);
     if dos_header.e_magic != 0x5A4D {
@@ -247,14 +226,12 @@ pub unsafe fn scan_for_vmp_sections(module_path: &str, module_base: usize) {
         return;
     }
 
-    // The section headers follow immediately after the optional header.
     let section_header_ptr = (nt_headers_ptr as usize + std::mem::size_of::<IMAGE_NT_HEADERS64>())
         as *const windows_sys::Win32::System::Diagnostics::Debug::IMAGE_SECTION_HEADER;
     let num_sections = nt_headers.FileHeader.NumberOfSections;
 
     for i in 0..num_sections {
         let section = &*section_header_ptr.add(i as usize);
-        // Section names are 8-byte, null-padded, UTF-8 strings.
         let name_slice = &section.Name[..];
         let name_len = name_slice.iter().position(|&c| c == 0).unwrap_or(8);
         if let Ok(name) = std::str::from_utf8(&name_slice[..name_len]) {
@@ -266,7 +243,6 @@ pub unsafe fn scan_for_vmp_sections(module_path: &str, module_base: usize) {
                         section_name: name.to_string(),
                     },
                 );
-                // We can break after the first detection, as one is enough to flag it.
                 break;
             }
         }

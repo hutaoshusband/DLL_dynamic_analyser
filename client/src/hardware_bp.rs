@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use shared::logging::{LogLevel, LogEvent};
@@ -8,17 +7,13 @@ use serde_json::json;
 use windows_sys::Win32::System::Diagnostics::Debug::{CONTEXT, GetThreadContext};
 use windows_sys::Win32::System::Threading::{GetCurrentThread};
 
-// Define the CONTEXT_DEBUG_REGISTERS flag locally if it's not available in the current windows-sys version.
 #[cfg(target_arch = "x86_64")]
 const CONTEXT_DEBUG_REGISTERS: u32 = 0x00100010;
 #[cfg(target_arch = "x86")]
 const CONTEXT_DEBUG_REGISTERS: u32 = 0x00010010;
 
-/// Checks the current thread's context for any active hardware breakpoints (DR0-DR3).
-/// This is a common anti-debugging technique.
 pub unsafe fn check_debug_registers() {
     let mut context: CONTEXT = std::mem::zeroed();
-    // We must specify the flags for the context we want to retrieve.
     context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
 
     let thread = GetCurrentThread();

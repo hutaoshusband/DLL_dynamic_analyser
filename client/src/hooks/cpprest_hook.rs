@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use shared::logging::{LogLevel, LogEvent};
@@ -11,8 +10,6 @@ use serde_json::json;
 use std::ffi::c_void;
 use std::mem::transmute;
 
-// The signature of the target function:
-// web::http::client::details::_http_client_communicator::async_send_request_impl
 const CPPREST_SIGNATURE: &str = "48 89 5C 24 ? 48 89 74 24 ? 57 48 81 EC ? ? ? ? 48 8B F2 48 8B D9";
 
 lazy_static! {
@@ -28,8 +25,6 @@ static_detour! {
     ) -> *const c_void;
 }
 
-/// Extracts a wide string (UTF-16) from a given memory address.
-/// This is highly unsafe and depends on the specific structure of cpprest's internal objects.
 unsafe fn extract_wide_string(base_ptr: *const c_void, offset: isize) -> String {
     if base_ptr.is_null() {
         return "<null_base_ptr>".to_string();
@@ -41,19 +36,12 @@ unsafe fn extract_wide_string(base_ptr: *const c_void, offset: isize) -> String 
     widestring::U16CStr::from_ptr_str(wide_str_ptr).to_string_lossy()
 }
 
-/// The hook handler for the cpprest send request function.
-/// It intercepts the call, logs the request details, and then calls the original function.
 unsafe fn hooked_cpprest_send_request(
     this_ptr: *const c_void,
     request_ptr: *const c_void, // This is a pointer to a std::shared_ptr<http_request_impl>
 ) -> *const c_void {
-    // The request_ptr argument is a pointer to a shared_ptr. To get the actual
-    // pointer to the http_request_impl object, we need to dereference it once.
     let actual_request_ptr = *(request_ptr as *const *const c_void);
 
-    // These offsets are specific to the version of cpprestsdk being targeted
-    // and may need adjustment for different versions.
-    // Offsets for http_request_impl structure:
     let method = extract_wide_string(actual_request_ptr, 8);
     let path = extract_wide_string(actual_request_ptr, 32);
     let host = extract_wide_string(actual_request_ptr, 48);
@@ -70,13 +58,9 @@ unsafe fn hooked_cpprest_send_request(
         stack_trace: None,
     });
 
-    // Call the original function to ensure the application continues to work correctly.
     CppRestSendRequestHook.call(this_ptr, request_ptr)
 }
 
-/// Initializes the cpprest hook.
-/// This function finds the target function in memory using its signature and, if found,
-/// applies the hook. This should be called once during DLL initialization.
 pub fn initialize_and_enable_hook() {
     crate::crash_logger::log_init_step("cpprest hook: Starting initialization");
     

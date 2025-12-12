@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use shared::logging::{LogLevel, LogEvent};
@@ -11,8 +10,6 @@ use windows_sys::Win32::System::Memory::{
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-/// Periodically scans the process's memory for executable and writable regions.
-/// Such regions are suspicious as they can be used for runtime code modification or injection.
 pub fn monitor_code_modifications() {
     unsafe {
         let process = GetCurrentProcess();
@@ -30,8 +27,7 @@ pub fn monitor_code_modifications() {
                 break;
             }
 
-            // Check for the suspicious combination of EXECUTE and WRITE permissions.
-            if (mbi.Protect & PAGE_EXECUTE_READWRITE) != 0 && mbi.State != 0x10000 /*MEM_FREE*/ {
+            if (mbi.Protect & PAGE_EXECUTE_READWRITE) != 0 && mbi.State != 0x10000 {
                 let mut buffer = vec![0u8; std::cmp::min(mbi.RegionSize, 4096)];
                 let mut bytes_read = 0;
 
@@ -43,8 +39,6 @@ pub fn monitor_code_modifications() {
                     &mut bytes_read,
                 ) != 0
                 {
-                    // For now, we just log the existence of such a region.
-                    // A more advanced implementation could hash the region and track changes.
                     log_event(LogLevel::Warn, LogEvent::MemoryScan {
                         status: "Suspicious Memory Region Found".to_string(),
                         result: format!(
@@ -55,7 +49,6 @@ pub fn monitor_code_modifications() {
                 }
             }
 
-            // Move to the next memory region.
             address = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
         CloseHandle(process);

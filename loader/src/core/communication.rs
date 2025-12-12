@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use std::{
@@ -45,7 +44,6 @@ pub fn start_pipe_log_listener(
                 *status_arc.lock().unwrap() =
                     format!("Listener: Read {} bytes.", message_buffer.len());
 
-                // Process all complete messages (newline-delimited) in the buffer.
                 while let Some(newline_pos) = message_buffer.find('\n') {
                     let message = message_buffer.drain(..=newline_pos).collect::<String>();
                     let trimmed_message = message.trim();
@@ -67,7 +65,6 @@ pub fn start_pipe_log_listener(
     });
 }
 
-// A helper function to reduce code duplication for connecting to a named pipe.
 fn connect_to_pipe(
     pipe_name: &str,
     access: u32,
@@ -94,7 +91,6 @@ fn connect_to_pipe(
         if pipe_handle != INVALID_HANDLE_VALUE {
             let msg = format!("Successfully connected to {}.", pipe_name);
             *status_arc.lock().unwrap() = msg;
-            // Don't send to logger - these are status messages, not JSON logs
             return Some(pipe_handle);
         }
 
@@ -102,7 +98,6 @@ fn connect_to_pipe(
         if err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND {
             let msg = format!("Failed to connect to {}. Error: {}", pipe_name, err);
             *status_arc.lock().unwrap() = msg;
-            // Don't send to logger - these are status messages, not JSON logs
             return None;
         }
 
@@ -118,7 +113,6 @@ fn connect_to_pipe(
 
     let msg = format!("Failed to connect to {} after all retries.", pipe_name);
     *status_arc.lock().unwrap() = msg;
-    // Don't send to logger - these are status messages, not JSON logs
     None
 }
 
@@ -130,7 +124,6 @@ pub fn connect_and_send_config(
     status_arc: Arc<Mutex<String>>,
     logger: Sender<String>,
 ) -> bool {
-    // Connect to the two separate pipes.
     let commands_pipe_handle =
         match connect_to_pipe(&get_commands_pipe_name(pid), FILE_GENERIC_WRITE, &status_arc, &logger) {
             Some(handle) => handle,
@@ -145,11 +138,9 @@ pub fn connect_and_send_config(
         }
     };
 
-    // Store the handles in the AppState.
     *commands_pipe_handle_arc.lock().unwrap() = Some(commands_pipe_handle);
     *logs_pipe_handle_arc.lock().unwrap() = Some(logs_pipe_handle);
 
-    // --- Send Initial Configuration via Commands Pipe ---
     let command = Command::UpdateConfig(config.clone());
     let command_json = match serde_json::to_string(&command) {
         Ok(json) => json,
@@ -187,7 +178,6 @@ pub fn connect_and_send_config(
 
     *status_arc.lock().unwrap() = "Configuration sent. Monitoring...".to_string();
 
-    // Start the log listener on the dedicated logs pipe.
     start_pipe_log_listener(logs_pipe_handle, logger, status_arc.clone());
     true
 }

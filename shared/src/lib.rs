@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 pub mod logging;
@@ -38,36 +37,25 @@ pub enum Command {
     LoadYaraRules(String),
 }
 
-// This macro simplifies the creation and maintenance of the MonitorConfig struct.
-// It defines the struct, its default implementation, and the logic for applying
-// configuration presets based on a single source of truth: the macro's arguments.
-// This eliminates the need for brittle, manual field-by-field manipulation
-// and ensures that adding a new hook is a simple, one-line change.
 macro_rules! define_monitor_config {
     (
-        // General (non-hook) config fields
         general {
             $($g_field:ident: $g_type:ty = $g_default:expr),*
         },
-        // All hook-related boolean flags
         hooks {
             $($h_field:ident),*
         }
     ) => {
         #[derive(Serialize, Deserialize, Debug, Clone)]
         pub struct MonitorConfig {
-            // General fields
             $(pub $g_field: $g_type),*,
-            // Hook fields
             $(pub $h_field: bool),*
         }
 
         impl Default for MonitorConfig {
             fn default() -> Self {
                 Self {
-                    // General fields default
                     $($g_field: $g_default),*,
-                    // Hook fields default to true
                     $($h_field: true),*
                 }
             }
@@ -78,7 +66,6 @@ macro_rules! define_monitor_config {
                 let mut config = Self::default();
                 match preset {
                     Preset::Stealth => {
-                        // Disable most features for stealth
                         config.api_hooks_enabled = true;
                         config.iat_scan_enabled = false;
                         config.string_dump_enabled = false;
@@ -89,10 +76,8 @@ macro_rules! define_monitor_config {
                         config.crypto_hooks_enabled = false;
                         config.log_network_data = false;
 
-                        // Disable all individual hooks
                         $(config.$h_field = false;)*
 
-                        // Selectively re-enable a few high-value hooks
                         config.hook_virtual_alloc_ex = true;
                         config.hook_create_remote_thread = true;
                         config.hook_load_library_w = true;
@@ -101,12 +86,10 @@ macro_rules! define_monitor_config {
                         config.hook_nt_query_information_process = true;
                     }
                     Preset::Balanced => {
-                        // Disable noisy or performance-heavy features
                         config.string_dump_enabled = false;
                         config.log_network_data = false;
                         config.stack_trace_on_error = true;
 
-                        // Disable some less common or potentially noisy hooks
                         config.hook_get_tick_count = false;
                         config.hook_query_performance_counter = false;
                         config.hook_output_debug_string_a = false;
@@ -114,7 +97,6 @@ macro_rules! define_monitor_config {
                         config.hook_find_next_file_w = false;
                     }
                     Preset::Aggressive => {
-                        // The default is aggressive, so no changes needed.
                     }
                 }
                 config
@@ -123,8 +105,6 @@ macro_rules! define_monitor_config {
     };
 }
 
-// Use the macro to define the MonitorConfig struct and its implementations.
-// This is now the single source of truth for all configuration fields.
 define_monitor_config! {
     general {
         loader_path: String = "".to_string(),

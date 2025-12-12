@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 #![recursion_limit = "1024"]
@@ -55,7 +54,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 
-// --- Globals ---
 pub static SUSPICION_SCORE: AtomicUsize = AtomicUsize::new(0);
 static LOG_SENDER: OnceCell<Sender<Option<LogEntry>>> = OnceCell::new();
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
@@ -138,7 +136,6 @@ fn handle_dump_module(module_name: &str) {
     }
 }
 
-// A simple, panic-safe file logger for early-stage debugging.
 fn debug_log(message: &str) {
     let _guard = DEBUG_LOG_MUTEX.lock().unwrap();
     let pid = unsafe { GetCurrentProcessId() };
@@ -149,7 +146,6 @@ fn debug_log(message: &str) {
     }
 }
 
-// Reads a single, newline-terminated message from the pipe, handling ERROR_MORE_DATA.
 fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<String, u32> {
     let mut read_buf = [0u8; 1024]; // A smaller, reasonable buffer for each read call.
     loop {
@@ -176,23 +172,17 @@ fn read_message_from_pipe(pipe_handle: isize, buffer: &mut String) -> Result<Str
                 buffer.push_str(&String::from_utf8_lossy(&read_buf[..bytes_read as usize]));
             }
             if error != ERROR_MORE_DATA {
-                 // If success was true but there's no more data, we might need to wait,
-                 // but for message-based pipes, we should get the whole message or an error.
-                 // If we have a newline, the loop start will catch it. If not, continue reading.
                  continue;
             }
         } else {
-            // A real error occurred
             return Err(error);
         }
     }
 }
 
-/// The main initialization thread. Creates the pipe server, waits for config, and starts features.
 fn main_initialization_thread() {
     debug_log("main_initialization_thread started.");
 
-    // --- Create Pipes ---
     let mut sa = unsafe {
         match SecurityAttributes::new() {
             Some(sa) => sa,
@@ -246,12 +236,8 @@ fn main_initialization_thread() {
     }
     debug_log("Logs pipe created successfully.");
 
-    // --- Connect Pipes ---
     debug_log("Waiting for loader to connect to both pipes...");
     
-    // ConnectNamedPipe returns 0 on failure. However, if the client has already connected
-    // between CreateNamedPipe and ConnectNamedPipe, it returns 0 and GetLastError() is ERROR_PIPE_CONNECTED.
-    // This is considered a SUCCESS.
     let ERROR_PIPE_CONNECTED = 535u32;
 
     let commands_res = unsafe { ConnectNamedPipe(commands_pipe_handle, std::ptr::null_mut()) };
@@ -278,7 +264,6 @@ fn main_initialization_thread() {
     }
     debug_log("Both pipes connected.");
 
-    // --- Unified Config/Command Handling ---
     let mut message_buffer = String::new();
     match read_message_from_pipe(commands_pipe_handle, &mut message_buffer) {
         Ok(config_message) => {
@@ -289,7 +274,6 @@ fn main_initialization_thread() {
                         &config.loader_path
                     ));
                     
-                    // Initialize crash_logger with the loader path for logs/ folder
                     crash_logger::init(&config.loader_path);
                     crash_logger::log_init_step("Config received, crash_logger initialized with loader path");
                     
@@ -299,7 +283,6 @@ fn main_initialization_thread() {
                     let (sender, receiver) = bounded(1024);
                     LOG_SENDER.set(sender).expect("Log sender already set");
 
-                    // Spawn threads with their dedicated pipes
                     crash_logger::log_init_step("Spawning command listener thread");
                     let command_thread = thread::spawn(move || {
                         command_listener_thread(commands_pipe_handle, message_buffer)
@@ -411,8 +394,6 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
         }
     }
     debug_log("Command listener thread finished.");
-    // The pipe handle is now owned by the main initialization thread's scope
-    // and will be closed when that thread finishes. We just disconnect here.
     if pipe_handle != INVALID_HANDLE_VALUE {
         unsafe {
             DisconnectNamedPipe(pipe_handle);
@@ -440,7 +421,6 @@ fn shannon_entropy(data: &[u8]) -> f32 {
 use pelite::pe64::{Pe, PeFile};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
-// Helper function to safely access and parse a specific module's PE file.
 fn with_pe_file<F, R>(source_name: &str, module_name: &str, closure: F) -> Option<R>
 where
     F: FnOnce(PeFile, isize) -> R,
@@ -517,7 +497,6 @@ fn handle_calculate_entropy(module_name: &str, section_name: &str) {
 fn handle_calculate_full_entropy(module_name: &str) {
     debug_log(&format!("Handling CalculateFullEntropy for module: {}", module_name));
     with_pe_file("handle_calculate_full_entropy", module_name, |file, base| {
-        // Calculate entropy across the entire module image
         let image_size = file.optional_header().SizeOfImage as usize;
         let data = unsafe {
             std::slice::from_raw_parts(base as *const u8, image_size)
@@ -541,8 +520,6 @@ fn handle_dump_section(module_name: &str, section_name: &str) {
         for section in file.section_headers() {
             if let Ok(name) = section.name() {
                 if name == section_name {
-                    // The correct way to dump a section from memory is to use its virtual address
-                    // relative to the module's base address, not the file-based `get_section_bytes`.
                     let section_start = (base as usize + section.VirtualAddress as usize) as *const u8;
                     let section_size = section.VirtualSize as usize;
                     let data = unsafe {
@@ -578,7 +555,6 @@ fn handle_list_sections(module_name: &str) {
 }
 
 fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize) {
-    // Use the loader_path from the global config to create log files.
     let config = CONFIG.features.read().unwrap();
     let base_path = PathBuf::from(&config.loader_path);
 
@@ -604,15 +580,11 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
             .open(log_file_path)
             .ok();
     }
-    // Drop the read lock so other threads can access the config.
     drop(config);
 
-    // Prevent the logger thread from triggering its own hooks (e.g., when calling WriteFile).
-    // By holding this guard, any hook called by this thread will see IN_HOOK=true and skip logging.
     let _guard = ReentrancyGuard::new();
 
     while let Ok(Some(log_entry)) = receiver.recv() {
-        // Always send to the pipe if it's valid
         if pipe_handle != INVALID_HANDLE_VALUE {
             if let Ok(json_string) = serde_json::to_string(&log_entry) {
                 let formatted_message = format!("{}\n", json_string);
@@ -640,11 +612,6 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
             }
         }
 
-        // Write to the appropriate log file.
-        // The ReentrancyGuard is intentionally omitted here. This thread is the designated
-        // logger; it's the one place where I/O is expected. The hooks themselves are
-        // guarded, so if this thread's file operations trigger a hook (e.g., WriteFile),
-        // the hook will correctly ignore it, preventing a loop.
         match log_entry.level {
             LogLevel::Debug => {
                 if let Some(file) = debug_log_file.as_mut() {
@@ -654,7 +621,6 @@ fn logging_thread_main(receiver: Receiver<Option<LogEntry>>, pipe_handle: isize)
                 }
             }
             _ => {
-                // All other levels go to the hook log
                 if let Some(file) = hook_log_file.as_mut() {
                     if let Ok(json_string) = serde_json::to_string(&log_entry) {
                         let _ = writeln!(file, "{}", json_string);
@@ -744,7 +710,6 @@ fn initialize_features(config: MonitorConfig) {
             debug_log("Scanner thread started");
             while !SHUTDOWN_SIGNAL.load(Ordering::SeqCst) {
                 if iat_enabled {
-                    // This was disabled due to causing stability issues and log spam.
                     // unsafe { iat_monitor::scan_iat_modifications(); }
                 }
                 if manual_map_enabled {
@@ -771,11 +736,8 @@ fn initialize_features(config: MonitorConfig) {
     log_event(LogLevel::Info, LogEvent::Initialization { status: "Feature initialization complete.".to_string() });
 }
 
-// EXCEPTION_CONTINUE_SEARCH constant (not exported by windows-sys)
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 
-/// Vectored Exception Handler to catch and log all crashes/exceptions
-/// Now uses crash_logger for comprehensive logging + MessageBox display
 unsafe extern "system" fn exception_handler(exception_info: *mut c_void) -> i32 {
     use windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS;
     
@@ -783,7 +745,6 @@ unsafe extern "system" fn exception_handler(exception_info: *mut c_void) -> i32 
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    // Cast to EXCEPTION_POINTERS
     let exception_ptrs = exception_info as *mut EXCEPTION_POINTERS;
     let exception_record_ptr = (*exception_ptrs).ExceptionRecord;
     
@@ -793,16 +754,12 @@ unsafe extern "system" fn exception_handler(exception_info: *mut c_void) -> i32 
 
     let exception_code = (*exception_record_ptr).ExceptionCode as u32;
     
-    // Skip breakpoint and single-step exceptions (used by debuggers and our HW BPs)
-    // These are expected during normal hardware breakpoint operation
     if exception_code == 0x80000003 || exception_code == 0x80000004 {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     
-    // Use crash_logger for comprehensive logging with MessageBox
     crash_logger::log_crash(exception_ptrs);
     
-    // Also try to log via the normal logging system if it's initialized
     let exception_address = (*exception_record_ptr).ExceptionAddress;
     let exception_name = match exception_code {
         0xC0000005 => "ACCESS_VIOLATION",
@@ -827,7 +784,6 @@ unsafe extern "system" fn exception_handler(exception_info: *mut c_void) -> i32 
         let _ = sender.try_send(Some(entry));
     }
 
-    // Continue searching for other handlers
     EXCEPTION_CONTINUE_SEARCH
 }
 
@@ -835,15 +791,10 @@ unsafe extern "system" fn exception_handler(exception_info: *mut c_void) -> i32 
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserved: *mut c_void) -> BOOL {
-    // 1. Raw WinAPI Beacon to verify code execution reaches here.
     unsafe {
         use windows_sys::Win32::Storage::FileSystem::{CreateFileA, WriteFile, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ};
         use windows_sys::Win32::Foundation::GENERIC_WRITE;
         
-        // Use a hardcoded path in TEMP for the beacon to avoid complex logic
-        // We can't easily get env var in no_std/raw mode, but we can assume C:\Windows\Temp or similar?
-        // Let's just try the current working directory or C:\Users\Public which is usually writable.
-        // Actually, let's use the PID in the filename to be distinct.
         let pid = GetCurrentProcessId();
         let name = format!("C:\\Users\\Public\\analyzer_beacon_{}.txt\0", pid);
         let handle = CreateFileA(
@@ -866,14 +817,12 @@ pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserv
     let result = std::panic::catch_unwind(|| {
         match call_reason {
             DLL_PROCESS_ATTACH => {
-                // Install panic hook FIRST - before anything else can crash
                 crash_logger::install_panic_hook();
                 crash_logger::early_debug_log("DllMain ATTACH - panic hook installed");
                 
                 debug_log("DllMain called with DLL_PROCESS_ATTACH.");
                 crash_logger::log_init_step("DllMain: DLL_PROCESS_ATTACH entered");
                 
-                // Install vectored exception handler SECOND to catch any crashes
                 unsafe {
                     crash_logger::log_init_step("DllMain: Installing VEH");
                     let handler = AddVectoredExceptionHandler(
@@ -889,8 +838,6 @@ pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserv
                     }
                 }
                 
-                // Using a separate thread for initialization is crucial to avoid deadlocks
-                // inside DllMain, which is a highly restricted environment.
                 crash_logger::log_init_step("DllMain: Spawning initialization thread");
                 let init_thread = thread::spawn(main_initialization_thread);
                 THREAD_HANDLES.lock().unwrap().push(init_thread);
@@ -901,18 +848,13 @@ pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserv
                 debug_log("DllMain called with DLL_PROCESS_DETACH.");
                 SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
     
-                // Signal the logging thread to shut down.
                 if let Some(sender) = LOG_SENDER.get() {
                     let _ = sender.send(None);
                 }
     
-                // Spawn a dedicated thread to handle the cleanup.
-                // This avoids blocking DllMain while waiting for threads to join.
                 thread::spawn(|| {
                     debug_log("Shutdown thread started.");
                     let mut handles = THREAD_HANDLES.lock().unwrap();
-                    // Drain the vector and join each handle. This will block the shutdown
-                    // thread (but not DllMain) until the background threads have exited.
                     for handle in handles.drain(..) {
                         let _ = handle.join();
                     }
@@ -928,14 +870,11 @@ pub extern "system" fn DllMain(_dll_module: HINSTANCE, call_reason: u32, _reserv
     match result {
         Ok(_) => 1,
         Err(_) => {
-            // Panic caught!
             unsafe {
-                // Try logging the panic if possible, or just fail safely.
                  use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
                  let msg = "PANIC IN DLLMAIN!\0";
                  OutputDebugStringA(msg.as_ptr());
             }
-            // If we panic in ATTACH, we should probably return FALSE to fail the load safely.
             0
         }
     }

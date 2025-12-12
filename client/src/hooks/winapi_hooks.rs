@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use shared::logging::{LogLevel, LogEvent};
@@ -18,7 +17,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use widestring::U16CStr;
 
-// The AllocInfo struct and ALLOCATED_REGIONS static are now managed by the vmp_dumper module.
 
 use windows_sys::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND};
 use windows_sys::Win32::Networking::WinSock::{
@@ -72,8 +70,6 @@ static LAST_QUERY_PERF_COUNTER_LOG: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| 
 
 const GENERIC_LOG_COOLDOWN: Duration = Duration::from_secs(5);
 
-/// Safely converts a null-terminated UTF-16 string pointer to a Rust String.
-/// Returns a placeholder if the pointer is null.
 unsafe fn safe_u16_str(ptr: *const u16) -> String {
     if ptr.is_null() {
         "<null_string_ptr>".to_string()
@@ -82,20 +78,16 @@ unsafe fn safe_u16_str(ptr: *const u16) -> String {
     }
 }
 
-/// Safely converts a null-terminated UTF-8 string pointer to a Rust String.
-/// Returns a placeholder if the pointer is null.
 unsafe fn safe_u8_str(ptr: *const u8) -> String {
     if ptr.is_null() {
         "<null_string_ptr>".to_string()
     } else {
-        // Treat the *const u8 as a C-style string.
         std::ffi::CStr::from_ptr(ptr as *const i8)
             .to_string_lossy()
             .into_owned()
     }
 }
 
-/// Formats the access flags from a `CreateFileW` call into a human-readable string.
 fn format_access_flags(flags: u32) -> String {
     let mut parts = Vec::new();
     if (flags & FILE_GENERIC_READ) != 0 {
@@ -111,8 +103,6 @@ fn format_access_flags(flags: u32) -> String {
     }
 }
 
-/// Formats a preview of a byte buffer as a hexadecimal string for logging.
-/// To avoid excessive memory reads, it only previews a small portion of the buffer.
 unsafe fn format_buffer_preview(ptr: *const u8, len: u32) -> String {
     if ptr.is_null() {
         return "<null_buffer_ptr>".to_string();
@@ -175,7 +165,6 @@ static_detour! {
     pub static OutputDebugStringAHook: unsafe extern "system" fn(*const u8);
 
 
-    // New hooks for VMP analysis
     pub static AddVectoredExceptionHandlerHook: unsafe extern "system" fn(u32, PVECTORED_EXCEPTION_HANDLER) -> *mut c_void;
     pub static CreateThreadHook: unsafe extern "system" fn(
         *const SECURITY_ATTRIBUTES, usize, LPTHREAD_START_ROUTINE,
@@ -189,7 +178,6 @@ static_detour! {
         HCRYPTKEY, HCRYPTHASH, BOOL, u32, *mut u8, *mut u32
     ) -> BOOL;
 
-    // C2 Detection Hooks
     pub static WSASendHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, u32, *mut OVERLAPPED, LpwsaOverlappedCompletionRoutine) -> i32;
     pub static WSARecvHook: unsafe extern "system" fn(SOCKET, *const WSABUF, u32, *mut u32, *mut u32, *mut OVERLAPPED, LpwsaOverlappedCompletionRoutine) -> i32;
     pub static SendHook: unsafe extern "system" fn(SOCKET, *const u8, i32, i32) -> i32;
@@ -203,7 +191,6 @@ static_detour! {
     pub static CertVerifyCertificateChainPolicyHook: unsafe extern "system" fn(i32, *const c_void, *const c_void, *mut c_void) -> BOOL;
     pub static CryptHashDataHook: unsafe extern "system" fn(HCRYPTHASH, *const u8, u32, u32) -> BOOL;
 
-    // Broader Feature Hooks
     pub static CopyFileWHook: unsafe extern "system" fn(*const u16, *const u16, BOOL) -> BOOL;
     pub static MoveFileWHook: unsafe extern "system" fn(*const u16, *const u16) -> BOOL;
     pub static GetTempPathWHook: unsafe extern "system" fn(u32, *mut u16) -> u32;
@@ -220,7 +207,6 @@ static_detour! {
     pub static CreateProcessAHook: unsafe extern "system" fn(*const u8, *mut u8, *const SECURITY_ATTRIBUTES, *const SECURITY_ATTRIBUTES, BOOL, u32, *const c_void, *const u8, *const windows_sys::Win32::System::Threading::STARTUPINFOA, *mut PROCESS_INFORMATION) -> BOOL;
 }
 
-// Type definitions for function pointers and structs that might be missing or complex.
 type LpwsaOverlappedCompletionRoutine = Option<unsafe extern "system" fn(u32, u32, *mut OVERLAPPED, u32)>;
 
 pub fn hooked_is_debugger_present() -> BOOL {
@@ -255,13 +241,8 @@ pub fn hooked_is_debugger_present() -> BOOL {
         }
     }
 
-    // notice by HUTAOSHUSBAND on 2025-12-10
-    // For safety/integrity, we now default to monitoring only.
-    // Lying about debugger presence can break application logic or cause integrity checks to fail.
     let result = unsafe { IsDebuggerPresentHook.call() };
     
-    // Optional: If you strictly want to hide the debugger, you could return 0.
-    // But for analysis safety, we pass the real value.
     // return 0; 
     result
 }
@@ -285,7 +266,6 @@ pub unsafe fn hooked_check_remote_debugger_present(
         );
     }
 
-    // Safe Mode: Call original verify logic instead of lying.
     CheckRemoteDebuggerPresentHook.call(h_process, pb_is_debugger_present)
 }
 
@@ -313,8 +293,6 @@ pub unsafe fn hooked_nt_query_information_process(
                 },
             );
         }
-        // Safe Mode: We log the check but do not interfere with the return value.
-        // Lying here often breaks the target's internal logic or injection chains.
     }
 
     NtQueryInformationProcessHook.call(
@@ -414,7 +392,6 @@ pub unsafe fn hooked_output_debug_string_a(lp_output_string: *const u8) {
         );
     }
 
-    // Call the original function to maintain normal behavior if a debugger is attached.
     OutputDebugStringAHook.call(lp_output_string);
 }
 
@@ -460,13 +437,9 @@ pub unsafe fn hooked_process32_first_w(h_snapshot: HANDLE, lppe: *mut PROCESSENT
 }
 
 pub unsafe fn hooked_process32_next_w(h_snapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL {
-    // This hook is called repeatedly in a loop. We use the same rate limiter
-    // as Process32FirstW to avoid spamming the log. A single message from
-    // Process32FirstW is enough to indicate that enumeration is happening.
     Process32NextWHook.call(h_snapshot, lppe)
 }
 
-/// Hook for `CreateFileW`. Logs the file path and desired access rights.
 pub unsafe fn hooked_create_file_w(
     lp_file_name: *const u16,
     dw_desired_access: u32,
@@ -501,7 +474,6 @@ pub unsafe fn hooked_create_file_w(
     )
 }
 
-/// Hook for `WriteFile`. Logs the number of bytes to write and a preview of the data.
 pub unsafe fn hooked_write_file(
     h_file: HANDLE,
     lp_buffer: *const u8,
@@ -509,7 +481,6 @@ pub unsafe fn hooked_write_file(
     lp_number_of_bytes_written: *mut u32,
     lp_overlapped: *mut OVERLAPPED,
 ) -> BOOL {
-    // Rate limit logging for WriteFile to avoid spam, especially from logging itself.
     let should_log = {
         let mut last_log_time = LAST_WRITE_FILE_LOG.lock().unwrap();
         if let Some(last_time) = *last_log_time {
@@ -765,8 +736,6 @@ pub unsafe fn hooked_reg_query_value_ex_w(
     lpcb_data: *mut u32,
 ) -> u32 {
     let value_name = safe_u16_str(lp_value_name);
-    // It's hard to get the full key path here without more complex tracking,
-    // so we'll just log the value name.
     if let Some(_guard) = ReentrancyGuard::new() {
         log_event(
             LogLevel::Debug,
@@ -915,20 +884,14 @@ pub fn hooked_delete_file_w(lp_file_name: *const u16) -> BOOL {
     unsafe { DeleteFileWHook.call(lp_file_name) }
 }
 
-/// Gets the name of a process from its PID.
 fn get_process_name_by_pid(pid: u32) -> String {
     if pid == 0 {
         return "<system_idle>".to_string();
     }
-    // NOTE: The current process PID is `std::process::id()`. If we are opening our own process,
-    // we can use a more direct way to get the name, but this is a general function.
 
-    // Open the process with limited query rights.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
 
     if handle == 0 {
-        // This can happen if the process has already exited, or if we lack permissions.
-        // For high-privilege processes, we might not be able to open them.
         return format!("<pid: {}>", pid);
     }
 
@@ -942,13 +905,11 @@ fn get_process_name_by_pid(pid: u32) -> String {
     }
 
     if result == 0 {
-        // Failed to get the process name.
         return format!("<pid: {}, error getting name>", pid);
     }
 
     let process_name_path = String::from_utf16_lossy(&buffer[..size as usize]);
 
-    // Extract just the executable name from the full path for cleaner logs.
     Path::new(&process_name_path)
         .file_name()
         .and_then(|s| s.to_str())
@@ -1026,7 +987,6 @@ pub unsafe fn hooked_virtual_alloc_ex(
         if let Some(_guard) = ReentrancyGuard::new() {
             let stack_trace = capture_stack_trace(CONFIG.stack_trace_frame_limit);
 
-            // Forward allocation info to the VMP dumper module.
             crate::vmp_dumper::track_memory_allocation(
                 result as usize,
                 dw_size,
@@ -1053,7 +1013,6 @@ pub unsafe fn hooked_virtual_alloc_ex(
     result
 }
 
-// --- C2 Detection Hook Implementations ---
 
 pub unsafe fn hooked_wsasend(
     s: SOCKET,
@@ -1156,7 +1115,6 @@ pub unsafe fn hooked_dns_query_w(
 ) -> NTSTATUS {
     if let Some(_guard) = ReentrancyGuard::new() {
         let hostname = safe_u16_str(psz_name);
-        // Basic check against a list of known bad domains.
         if hostname.contains("bad-domain.com") {
              SUSPICION_SCORE.fetch_add(50, Ordering::Relaxed);
         }
@@ -1320,7 +1278,6 @@ pub unsafe fn hooked_crypt_hash_data(
     CryptHashDataHook.call(h_hash, pb_data, dw_data_len, dw_flags)
 }
 
-// --- Broader Feature Hook Implementations ---
 
 pub unsafe fn hooked_copy_file_w(lp_existing_file_name: *const u16, lp_new_file_name: *const u16, b_fail_if_exists: BOOL) -> BOOL {
     if let Some(_guard) = ReentrancyGuard::new() {
@@ -1469,8 +1426,6 @@ pub unsafe fn hooked_get_temp_file_name_w(lp_path_name: *const u16, lp_prefix_st
 }
 
 pub unsafe fn hooked_find_next_file_w(h_find_file: HANDLE, lp_find_file_data: *mut windows_sys::Win32::Storage::FileSystem::WIN32_FIND_DATAW) -> BOOL {
-    // This function is often called in a tight loop. To avoid log spam, we don't log it by default.
-    // The initial FindFirstFileW call is usually sufficient to indicate enumeration.
     FindNextFileWHook.call(h_find_file, lp_find_file_data)
 }
 
@@ -1609,7 +1564,6 @@ pub fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
 
     if module_handle != 0 {
         if let Some(_guard) = ReentrancyGuard::new() {
-            // We have a valid handle, now let's read the module from memory for analysis.
             unsafe {
                 let dos_header = &*(module_handle as *const windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER);
                 if dos_header.e_magic == 0x5A4D { // "MZ"
@@ -1620,7 +1574,6 @@ pub fn hooked_load_library_w(lp_lib_file_name: *const u16) -> HINSTANCE {
                         let size_of_image = nt_headers.OptionalHeader.SizeOfImage;
                         let _module_data = slice::from_raw_parts(module_handle as *const u8, size_of_image as usize);
                         
-                        // Run static analysis on the loaded module.
                         // crate::static_analyzer::analyze_module(module_data);
                     }
                 }
@@ -1862,7 +1815,6 @@ pub unsafe fn initialize_all_hooks() {
     crate::crash_logger::log_init_step("WinAPI hooks: Starting initialization");
     let config = CONFIG.features.read().unwrap();
 
-    // Hook critical process termination functions.
     if config.hook_exit_process {
         let exit_process_ptr: unsafe extern "system" fn(u32) -> ! =
             std::mem::transmute(ExitProcess as *const ());
@@ -1878,7 +1830,6 @@ pub unsafe fn initialize_all_hooks() {
         );
     }
 
-    // Anti-debugging hooks
     if config.hook_is_debugger_present {
         hook!(
             IsDebuggerPresentHook,
@@ -1911,7 +1862,6 @@ pub unsafe fn initialize_all_hooks() {
         );
     }
 
-    // Process enumeration hooks
     if config.hook_create_toolhelp32_snapshot {
         hook!(
             CreateToolhelp32SnapshotHook,
@@ -1953,7 +1903,6 @@ pub unsafe fn initialize_all_hooks() {
         hook!(MessageBoxWHook, MessageBoxW, hooked_message_box_w);
     }
 
-    // Hook process interaction functions - DISABLED FOR STABILITY
     /*
     if config.hook_open_process {
         hook!(OpenProcessHook, OpenProcess, |a, b, c| {
@@ -1976,7 +1925,6 @@ pub unsafe fn initialize_all_hooks() {
     }
     */
 
-    // Hook library loading functions.
     if config.hook_load_library_w {
         hook!(LoadLibraryWHook, LoadLibraryW, hooked_load_library_w);
     }
@@ -1985,7 +1933,6 @@ pub unsafe fn initialize_all_hooks() {
     }
 
     if config.registry_hooks_enabled {
-        // Hook registry functions.
         if config.hook_reg_create_key_ex_w {
             hook!(
                 RegCreateKeyExWHook,
@@ -2020,7 +1967,6 @@ pub unsafe fn initialize_all_hooks() {
         hook!(DeleteFileWHook, DeleteFileW, |a| hooked_delete_file_w(a));
     }
 
-    // Broader Feature Hooks
     if config.hook_copy_file_w {
         hook!(CopyFileWHook, CopyFileW, |a, b, c| hooked_copy_file_w(a, b, c));
     }
@@ -2057,7 +2003,6 @@ pub unsafe fn initialize_all_hooks() {
         hook!(CreateProcessAHook, CreateProcessA, |a, b, c, d, e, f, g, h, i, j| hooked_create_process_a(a, b, c, d, e, f, g, h, i, j));
     }
 
-    // Hook thread creation.
     if config.hook_create_remote_thread {
         hook!(
             CreateRemoteThreadHook,
@@ -2071,7 +2016,6 @@ pub unsafe fn initialize_all_hooks() {
         });
     }
 
-    // Hook exception handling
     if config.hook_add_vectored_exception_handler {
         hook!(
             AddVectoredExceptionHandlerHook,
@@ -2118,7 +2062,6 @@ unsafe fn initialize_dynamic_hooks() {
                     );
                 }
             }
-            // Silently ignore if the library is not loaded. This is common.
         };
     }
 
@@ -2154,14 +2097,12 @@ unsafe fn initialize_dynamic_hooks() {
     }
 
     if config.network_hooks_enabled {
-        // C2 Detection Hooks
         if config.hook_wsasend {
             dyn_hook!(WSASendHook, "ws2_32.dll", b"WSASend\0", |a, b, c, d, e, f, g| hooked_wsasend(a, b, c, d, e, f, g));
         }
         if config.hook_send {
             dyn_hook!(SendHook, "ws2_32.dll", b"send\0", |a, b, c, d| hooked_send(a, b, c, d));
         }
-        // Note: WSARecv and recv are more complex to hook safely due to buffer management. Skipping for now.
 
         if config.hook_internet_open_w {
             dyn_hook!(InternetOpenWHook, "wininet.dll", b"InternetOpenW\0", |a, b, c, d, e| hooked_internet_open_w(a, b, c, d, e));
@@ -2207,7 +2148,6 @@ unsafe fn initialize_dynamic_hooks() {
 }
 
 pub unsafe fn hooked_shell_execute_ex_w(p_shellexecuteinfo: *mut c_void) -> BOOL {
-    // A more complex structure to parse here, for now we just log the call.
     if let Some(_guard) = ReentrancyGuard::new() {
         log_event(
             LogLevel::Warn,

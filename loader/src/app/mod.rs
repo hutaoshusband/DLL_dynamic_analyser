@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 pub mod state;
 
@@ -30,7 +29,6 @@ pub struct App {
     is_maximized: bool,
     last_window_rect: Option<egui::Rect>,
     
-    // Animation
     startup_time: Option<f64>,
     animation_finished: bool,
     frame_count: usize,
@@ -53,7 +51,6 @@ impl App {
     }
 }
 
-// Helper function to enforce WS_EX_LAYERED style for transparency
 fn enforce_transparency(hwnd: isize) {
     unsafe {
         let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -67,15 +64,10 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let mut state = self.state.lock().unwrap();
 
-        // Process any incoming logs
         while let Ok(log_json) = self.log_receiver.try_recv() {
             state.handle_log(&log_json);
         }
 
-        // --- Transparency Enforcement ---
-        // Access the raw window handle to force the WS_EX_LAYERED style.
-        // This is necessary because some Windows operations (like snapping/maximizing)
-        // can strip this style, breaking the transparency.
         if let Ok(handle) = frame.window_handle() {
             if let RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
                 enforce_transparency(win32_handle.hwnd.get());
@@ -84,13 +76,10 @@ impl eframe::App for App {
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-        // --- Startup Animation ---
         
-        // 1. Determine Target Resolution (Once and Cache)
         if self.startup_target_rect.is_none() {
              let mut screen_rect = ctx.input(|i| i.screen_rect());
              
-             // Sanity check: If screen_rect is suspiciously small (uninitialized or failed), try fallback.
              if screen_rect.width() < 800.0 || screen_rect.height() < 600.0 {
                   if let Some(vp_rect) = ctx.input(|i| i.viewport().outer_rect) {
                       if vp_rect.width() > 800.0 {
@@ -103,7 +92,6 @@ impl eframe::App for App {
                   }
              }
 
-             // Define a target window size (e.g., 1200x800), but don't exceed screen size
              let target_w = 1200.0f32.min(screen_rect.width() * 0.9);
              let target_h = 800.0f32.min(screen_rect.height() * 0.9);
              let target_size = egui::vec2(target_w, target_h);
@@ -113,20 +101,15 @@ impl eframe::App for App {
              
              let candidate = egui::Rect::from_min_size(target_pos, target_size);
 
-             // Store the determined target.
              self.startup_target_rect = Some(candidate);
         }
         
-        // Use the cached target for stability
         let target_final_rect = self.startup_target_rect.unwrap();
 
-        // 0. Warmup phase: Wait for a few frames to let the OS/Window Monitor info stabilize
         self.frame_count += 1;
         if self.frame_count < 10 { // Increased warmup to 10 frames to be safe
-             // Force "Start" state during warmup
              let start_w = 10.0; // Start REALLY small as requested ("fast nichts")
              let start_h = 10.0;
-             // Start from the center of the TARGET rect (which is center of screen)
              let center = target_final_rect.center(); 
              let start_pos = center - egui::vec2(start_w, start_h) / 2.0;
 
@@ -137,7 +120,6 @@ impl eframe::App for App {
         } else if !self.animation_finished {
              let now = ctx.input(|i| i.time);
              
-             // Initialize start time on the first valid frame
              if self.startup_time.is_none() {
                  self.startup_time = Some(now);
              }
@@ -146,25 +128,20 @@ impl eframe::App for App {
              let duration = 0.6; // 600ms
              let t_raw = ((now - start) / duration).clamp(0.0, 1.0) as f32;
              
-             // Cubic Ease Out
              let t = 1.0 - (1.0 - t_raw).powi(3);
 
              if t_raw >= 1.0 {
                  self.animation_finished = true;
                  
-                 // Finalize: Windowed Mode (Centered)
                  self.is_maximized = false; 
                  
-                 // Apply final state
                  ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
                  ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_final_rect.min));
                  ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_final_rect.size()));
              } else {
-                  // Animation Step
                  let center = target_final_rect.center();
                  let target_size = target_final_rect.size();
                  
-                 // "Almost nothing" (10px) to Target Size
                  let start_size = egui::vec2(10.0, 10.0);
                  
                  let current_size = start_size + (target_size - start_size) * t;
@@ -177,67 +154,71 @@ impl eframe::App for App {
              }
         }
         
-        // 1. Detect OS Maximize attempt (e.g. Win+Up) and switch to custom maximize
         if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             self.is_maximized = true;
             
-            // Re-assert transparency properties immediately
             ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
             let monitor_rect = ctx.input(|i| i.screen_rect());
-            // Reduce height by 1.0 to avoid Windows "Fullscreen Optimization" which kills transparency
-            // This 1px difference is invisible but critical.
             let safe_rect = egui::Rect::from_min_size(monitor_rect.min, monitor_rect.size() - egui::vec2(0.0, 1.0));
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(safe_rect.min));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(safe_rect.size()));
         }
 
-        // 2. Track window size when not maximized (for restore)
         if !self.is_maximized && self.animation_finished {
              if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
                 self.last_window_rect = Some(rect);
              }
         }
 
-        // Helper for toggling maximize state
         let toggle_maximize = |is_maximized: &mut bool, last_rect: Option<egui::Rect>| {
             if *is_maximized {
-                // Restore
                 *is_maximized = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
                 if let Some(rect) = last_rect {
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(rect.min));
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(rect.size()));
                 } else {
-                    // Default fallback if no history
                      ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([1000.0, 700.0].into()));
                 }
             } else {
-                // Maximize
                 *is_maximized = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
                 let monitor_rect = ctx.input(|i| i.screen_rect());
-                // Reduce height by 1.0 to avoid Windows "Fullscreen Optimization" which kills transparency
                 let safe_rect = egui::Rect::from_min_size(monitor_rect.min, monitor_rect.size() - egui::vec2(0.0, 1.0));
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(safe_rect.min));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(safe_rect.size()));
             }
         };
 
-        // Custom window frame for the "frosted glass" look
+        let (primary_clicked, pointer_pos) = ctx.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Primary),
+                i.pointer.interact_pos().or(i.pointer.hover_pos()),
+            )
+        });
+
+        if primary_clicked {
+            if let Some(pos) = pointer_pos {
+                 state.active_ripples.push(RippleAnimation {
+                    start_time: ctx.input(|i| i.time),
+                    center: pos,
+                    color: egui::Color32::from_rgb(0x33, 0xCC, 0xFF),
+                });
+            }
+        }
+
         let panel_frame = egui::Frame {
             fill: egui::Color32::TRANSPARENT, // Keep transparent as per original requirement
             ..egui::Frame::central_panel(&ctx.style())
         };
 
-        // Custom title bar and centered tabs
         egui::TopBottomPanel::top("title_bar")
             .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
             .exact_height(40.0) // Set a fixed height
             .show(ctx, |ui| {
-                // Allow dragging the window by the title bar
                 let response = ui.interact(ui.max_rect(), ui.id(), egui::Sense::click_and_drag());
                 if response.dragged() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -246,7 +227,6 @@ impl eframe::App for App {
                      toggle_maximize(&mut self.is_maximized, self.last_window_rect);
                 }
 
-                // Center the content vertically
                 ui.with_layout(egui::Layout::from_main_dir_and_cross_align(egui::Direction::LeftToRight, egui::Align::Center), |ui| {
                     let tabs = [
                         (ActiveTab::Launcher, "🚀 Launcher"),
@@ -256,7 +236,6 @@ impl eframe::App for App {
                         (ActiveTab::Network, "🌐 Network"),
                     ];
 
-                    // Calculate tabs width
                     let mut tabs_width = 0.0;
                     let style = ui.style();
                     let font_id = egui::TextStyle::Button.resolve(style);
@@ -277,7 +256,6 @@ impl eframe::App for App {
 
                     ui.add_space(spacer_width);
 
-                    // Render tabs
                     for (tab, title) in tabs.iter() {
                         let is_active = state.active_tab == *tab;
                         let button = egui::Button::new(*title)
@@ -300,60 +278,21 @@ impl eframe::App for App {
                                 state.tab_transition_start = Some(ctx.input(|i| i.time));
                                 state.active_tab = *tab;
                             }
-                            
-                            // Add Ripple Effect
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                state.active_ripples.push(RippleAnimation {
-                                    start_time: ctx.input(|i| i.time),
-                                    center: pos,
-                                    color: egui::Color32::from_rgb(0x33, 0xCC, 0xFF),
-                                });
-                            }
                         }
                     }
 
-                    // --- Render Ripples ---
-                    let current_time = ctx.input(|i| i.time);
-                    state.active_ripples.retain(|ripple| {
-                        let elapsed = current_time - ripple.start_time;
-                        let duration = 0.6; // 600ms animation
-                        if elapsed >= duration {
-                            false
-                        } else {
-                            let t = elapsed as f32 / duration as f32;
-                            let radius = t * 150.0; // Max radius 150
-                            let opacity = (1.0 - t).powi(2); // Quadratic ease-out or just squared falloff for faster fade
-                            
-                            // Use a separate painter to draw on top of everything in this layer
-                             ui.ctx().layer_painter(ui.layer_id()).circle_filled(
-                                ripple.center,
-                                radius,
-                                ripple.color.linear_multiply(opacity),
-                            );
-                            true
-                        }
-                    });
-
-                    if !state.active_ripples.is_empty() {
-                        ctx.request_repaint();
-                    }
-
-                    // Window Controls (Min, Max, Close)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let button_size = [24.0, 24.0];
                         
-                        // Close
                         if ui.add_sized(button_size, egui::Button::new("❌")).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
 
-                        // Maximize / Restore
                         let max_icon = if self.is_maximized { "❐" } else { "🗖" };
                         if ui.add_sized(button_size, egui::Button::new(max_icon)).clicked() {
                              toggle_maximize(&mut self.is_maximized, self.last_window_rect);
                         }
 
-                        // Minimize
                         if ui.add_sized(button_size, egui::Button::new("🗕")).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
@@ -364,8 +303,6 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
-                // Optimize: Don't render complex UI during the heavy window resize animation
-                // This prevents the "extreme lag" caused by re-layouting every frame.
                 if !self.animation_finished {
                     ui.centered_and_justified(|ui| {
                         ui.spinner(); // Optional: Show a small spinner or nothing
@@ -373,10 +310,8 @@ impl eframe::App for App {
                     return;
                 }
 
-                // Add a separator and space for visual clarity
                 ui.add(egui::Separator::default().spacing(10.0));
 
-                // --- Tab Content Transition ---
                 let mut transition_active = false;
                 if let (Some(prev_tab), Some(start_time)) = (state.previous_tab, state.tab_transition_start) {
                     let now = ctx.input(|i| i.time);
@@ -386,7 +321,6 @@ impl eframe::App for App {
                     if t < 1.0 {
                         transition_active = true;
                         let t = t as f32;
-                        // Cubic ease out: 1 - (1-t)^3
                         let t_ease = 1.0 - (1.0 - t).powi(3);
                         
                         let prev_idx = get_tab_index(prev_tab);
@@ -396,10 +330,8 @@ impl eframe::App for App {
                         let rect = ui.available_rect_before_wrap();
                         let width = rect.width();
 
-                        // Clip to viewport
                         ui.set_clip_rect(rect);
 
-                        // Render Previous Tab (Sliding Out)
                         {
                             let offset_x = -dir * width * t_ease;
                             let mut prev_rect = rect;
@@ -412,7 +344,6 @@ impl eframe::App for App {
                             });
                         }
 
-                        // Render Current Tab (Sliding In)
                         {
                             let offset_x = dir * width * (1.0 - t_ease);
                             let mut curr_rect = rect;
@@ -428,7 +359,6 @@ impl eframe::App for App {
                         
                         ctx.request_repaint();
                     } else {
-                        // Transition finished
                         state.previous_tab = None;
                         state.tab_transition_start = None;
                     }
@@ -441,9 +371,33 @@ impl eframe::App for App {
             });
 
 
-        // Request a repaint if the process is running to keep the UI updated
         if state.is_process_running.load(Ordering::SeqCst) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+
+        // Render Global Ripples
+        let current_time = ctx.input(|i| i.time);
+        state.active_ripples.retain(|ripple| {
+            let elapsed = current_time - ripple.start_time;
+            let duration = 0.6; // 600ms animation
+            if elapsed >= duration {
+                false
+            } else {
+                let t = elapsed as f32 / duration as f32;
+                let radius = t * 150.0; // Max radius 150
+                let opacity = (1.0 - t).powi(2); // Quadratic ease-out or just squared falloff for faster fade
+                
+                 ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("global_ripples"))).circle_filled(
+                    ripple.center,
+                    radius,
+                    ripple.color.linear_multiply(opacity),
+                );
+                true
+            }
+        });
+
+        if !state.active_ripples.is_empty() {
+            ctx.request_repaint();
         }
     }
 }

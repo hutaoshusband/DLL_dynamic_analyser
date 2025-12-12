@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use std::{
@@ -24,7 +23,6 @@ pub struct ModuleInfo {
     pub size: u32,
 }
 
-// Represents the currently active main tab in the GUI.
 #[derive(PartialEq, Clone, Copy)]
 pub enum ActiveTab {
     Launcher,
@@ -91,7 +89,6 @@ impl AppState {
         let default_preset = Preset::default();
         let mut monitor_config = MonitorConfig::from_preset(default_preset);
 
-        // Set the loader_path in the config
         if let Some(path) = exe_path.as_ref().and_then(|p| p.parent()) {
             monitor_config.loader_path = path.to_string_lossy().to_string();
         }
@@ -184,7 +181,6 @@ impl AppState {
         }
     }
 
-    // Helper function to add a log entry and handle deduplication
     fn add_log_entry(&mut self, new_log: LogEntry) {
         if let Some((last_log, count)) = self.logs.last_mut() {
             if *last_log == new_log {

@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 #[cfg(feature = "use_yara")]
 use yara_x::{Compiler, Rules, Scanner};
@@ -68,7 +67,6 @@ impl YaraScanner {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
         let sys_info_max = 0x7FFFFFFF0000; // rough user-mode limit for x64
 
-        // Create a Scanner
         let mut scanner = Scanner::new(rules);
 
         while address < sys_info_max {
@@ -84,7 +82,6 @@ impl YaraScanner {
                 break;
             }
 
-            // Skip uncommitted, no-access, or guard pages
             let is_accessible = (mbi.State & MEM_COMMIT != 0)
                 && (mbi.Protect & PAGE_NOACCESS == 0)
                 && (mbi.Protect & PAGE_GUARD == 0);
@@ -93,27 +90,15 @@ impl YaraScanner {
                 let size = mbi.RegionSize;
                 let ptr = mbi.BaseAddress as *const u8;
                 
-                // 100MB limit per region
                 if size > 0 && size < 100 * 1024 * 1024 {
-                    // Use ReentrancyGuard while scanning to prevent potential recursion if YARA scan triggers hooks
-                    // (e.g. if it causes memory allocation or file access internally that is hooked)
                     if let Some(_guard) = ReentrancyGuard::new() {
-                        // Safety: we checked that the memory is committed and accessible.
-                        // However, memory state can change in a multi-threaded process.
-                        // Accessing memory in a running process is inherently risky (race conditions).
-                        // std::slice::from_raw_parts is unsafe, but we are doing our best with VirtualQuery.
                         let data = unsafe { std::slice::from_raw_parts(ptr, size) };
                         
-                        // yara-x scan api
-                        // We wrap the scan in a catch_unwind-like block if possible, but yara-x is pure Rust.
-                        // If yara-x panics, it will bring down the thread (or process).
-                        // We rely on yara-x robustness.
                         match scanner.scan(data) {
                             Ok(results) => {
                                 for match_rule in results.matching_rules() {
                                     let rule_name = match_rule.identifier();
                                     let meta: serde_json::Value = match_rule.metadata().map(|(key, value)| {
-                                        // yara-x metadata value handling
                                         let val_str = match value {
                                             yara_x::MetaValue::Integer(i) => i.to_string(),
                                             yara_x::MetaValue::Float(f) => f.to_string(),
@@ -124,7 +109,6 @@ impl YaraScanner {
                                         (key.to_string(), json!(val_str))
                                     }).collect();
 
-                                    // Use the dedicated YaraMatch event for better UI display
                                     log_event(
                                         LogLevel::Warn,
                                         LogEvent::YaraMatch {
@@ -137,7 +121,6 @@ impl YaraScanner {
                                 }
                             },
                             Err(e) => {
-                                // Log scan errors
                                 log_event(
                                     LogLevel::Debug,
                                     LogEvent::Error {
@@ -161,6 +144,5 @@ impl YaraScanner {
     }
 }
 
-// Global instance
 #[cfg(feature = "use_yara")]
 pub static SCANNER: Lazy<Mutex<YaraScanner>> = Lazy::new(|| Mutex::new(YaraScanner::new()));

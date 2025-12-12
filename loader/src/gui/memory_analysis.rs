@@ -1,10 +1,11 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
+
 use eframe::egui::{self, Ui, Color32, RichText};
 
 use crate::app::state::AppState;
 use crate::core::injection;
 use shared::Command;
 
-/// Tracked view mode for the main content area
 #[derive(Default, Clone, Copy, PartialEq)]
 pub enum MemoryViewMode {
     #[default]
@@ -22,11 +23,7 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
         .auto_shrink([false, false])
         .show(ui, |ui| {
             
-            // ═══════════════════════════════════════════════════════════════════════
-            // MODULE & SECTION SELECTION ROW
-            // ═══════════════════════════════════════════════════════════════════════
             ui.horizontal(|ui| {
-                // Module Selection
                 ui.group(|ui| {
                     ui.set_min_width(280.0);
                     ui.horizontal(|ui| {
@@ -65,7 +62,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
 
                 ui.add_space(16.0);
 
-                // Section Selection
                 ui.group(|ui| {
                     ui.set_min_width(280.0);
                     ui.horizontal(|ui| {
@@ -124,7 +120,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                         });
                 });
 
-                // Section Actions
                 if state.selected_section_name.is_some() {
                     ui.add_space(8.0);
                     let module_name = state.selected_module_index.and_then(|i| {
@@ -182,9 +177,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
             ui.separator();
             ui.add_space(8.0);
 
-            // ═══════════════════════════════════════════════════════════════════════
-            // VIEW MODE TABS
-            // ═══════════════════════════════════════════════════════════════════════
             ui.horizontal(|ui| {
                 let current_mode = state.memory_view_mode;
                 
@@ -229,13 +221,7 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
             ui.separator();
             ui.add_space(12.0);
 
-            // ═══════════════════════════════════════════════════════════════════════
-            // CONTENT AREA
-            // ═══════════════════════════════════════════════════════════════════════
             match state.memory_view_mode {
-                // ─────────────────────────────────────────────────────────────────
-                // Full Module Entropy View
-                // ─────────────────────────────────────────────────────────────────
                 MemoryViewMode::FullEntropy => {
                     ui.horizontal(|ui| {
                         if ui.button("⚡ Calculate Full Module Entropy").clicked() {
@@ -280,7 +266,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                             let max = entropy.iter().cloned().fold(0.0_f32, f32::max);
                             let min = entropy.iter().cloned().fold(8.0_f32, f32::min);
                             
-                            // Stats row
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Module:").color(Color32::from_rgb(127, 132, 156)));
                                 ui.label(RichText::new(module_name).strong());
@@ -313,7 +298,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                             
                             ui.add_space(12.0);
 
-                            // Large entropy graph
                             let graph_height = (available_height - 200.0).max(300.0);
                             
                             let points: PlotPoints = entropy
@@ -360,9 +344,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                     }
                 }
 
-                // ─────────────────────────────────────────────────────────────────
-                // Per-Section Entropy View
-                // ─────────────────────────────────────────────────────────────────
                 MemoryViewMode::PerSectionEntropy => {
                     ui.horizontal(|ui| {
                         if ui.button("🗑 Clear All Results").clicked() {
@@ -406,7 +387,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                                     ui.label(RichText::new(format!("{:#X} • {} bytes", section.virtual_address, section.virtual_size))
                                         .size(11.0).color(Color32::from_rgb(127, 132, 156)));
                                         
-                                    // Quick scan button
                                     let module_name = state.selected_module_index.and_then(|i| {
                                         let modules = state.modules.lock().unwrap();
                                         modules.get(i).map(|m| m.name.clone())
@@ -482,9 +462,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                     }
                 }
 
-                // ─────────────────────────────────────────────────────────────────
-                // YARA Matches View
-                // ─────────────────────────────────────────────────────────────────
                 MemoryViewMode::YaraMatches => {
                     ui.horizontal(|ui| {
                         if ui.button("🗑 Clear Matches").clicked() {
@@ -510,7 +487,6 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                         let matches_clone: Vec<_> = yara_matches.iter().cloned().collect();
                         drop(yara_matches);
                         
-                        // Table header
                         egui::Grid::new("yara_header")
                             .num_columns(3)
                             .spacing([40.0, 4.0])

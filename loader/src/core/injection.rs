@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use std::{mem, path::Path, fs, env};
@@ -76,9 +75,6 @@ pub fn enable_debug_privilege() -> Result<(), String> {
 
         if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
             CloseHandle(h_token);
-            // It's possible we are not admin, so we can't get the privilege.
-            // We return an error so the caller knows, but maybe we should allow proceeding?
-            // For now, let's return error so it's explicit.
             return Err("AdjustTokenPrivileges: ERROR_NOT_ALL_ASSIGNED (Run as Admin?)".to_string());
         }
 
@@ -92,8 +88,6 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
         return Err(format!("DLL file not found at path: {}", dll_path.display()));
     }
     
-    // Try to enable debug privilege to access elevated processes.
-    // We log the error but proceed, in case the target is not elevated and we don't strictly need it.
     if let Err(e) = enable_debug_privilege() {
         eprintln!("Warning: Failed to enable debug privilege: {}", e);
     }
@@ -115,8 +109,6 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
         return Err(format!("OpenProcess failed: {}", unsafe { GetLastError() }));
     }
 
-    // Architecture Check: Prevent 64-bit loader from injecting into 32-bit target.
-    // A 64-bit DLL cannot be loaded into a 32-bit process, and LoadLibraryW failure often indicates this.
     #[cfg(target_arch = "x86_64")]
     unsafe {
         let mut is_wow64: i32 = 0;
@@ -126,11 +118,6 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     }
 
-    // Fix for "LoadLibraryW returns NULL" due to Permissions:
-    // User's Temp dir (AppData) is often not readable by SYSTEM processes.
-    // We use C:\Users\Public which is universally readable.
-    // We use C:\Users\Public which is universally readable.
-    // Randomize filename to avoid detection/locking.
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let random_name = format!("analyzer_{}.dll", timestamp);
     
@@ -138,12 +125,9 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     let temp_dll_path = if public_dir.exists() {
         public_dir.join(&random_name)
     } else {
-        // Fallback to temp if Public missing (rare)
         env::temp_dir().join(&random_name)
     };
     
-    // Attempt copy. If it fails (e.g. file in use), we try to overwrite or just proceed with original?
-    // Let's try to copy and fall back to original if copy fails, or error out.
     let path_to_use = match fs::copy(dll_path, &temp_dll_path) {
         Ok(_) => {
             temp_dll_path.as_path()
@@ -154,9 +138,6 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     };
 
-    // Fix for "Access Denied" by specific Service Accounts or AppContainers:
-    // Even in Public, specific low-privilege accounts might not have Read+Execute permissions inherited.
-    // We explicitly grant "Everyone" (SID: S-1-1-0) Read & Execute rights using icacls.
     let _ = std::process::Command::new("icacls")
         .arg(path_to_use)
         .arg("/grant")
@@ -197,7 +178,6 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     };
 
     if write_success == 0 {
-        // In a real scenario, we should free the allocated memory here.
         unsafe { CloseHandle(process_handle) };
         return Err(format!("WriteProcessMemory failed: {}", unsafe { GetLastError() }));
     }
@@ -211,7 +191,6 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     };
 
     if load_library_addr.is_none() {
-        // In a real scenario, we should free the allocated memory here.
         unsafe { CloseHandle(process_handle) };
         return Err("Could not find LoadLibraryW".into());
     }
@@ -229,14 +208,10 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     };
 
     if thread_handle == 0 {
-        // In a real scenario, we should free the allocated memory here.
         unsafe { CloseHandle(process_handle) };
         return Err(format!("CreateRemoteThread failed: {}", unsafe { GetLastError() }));
     }
 
-    // Wait for the thread to finish executing LoadLibraryW.
-    // This creates a slight delay but ensures we know if injection worked.
-    // 5 seconds timeout should be plenty for LoadLibrary.
     let wait_result = unsafe { WaitForSingleObject(thread_handle, 5000) };
     if wait_result == 0x00000000 { // WAIT_OBJECT_0
         let mut exit_code = 0;
@@ -244,12 +219,9 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
         if exit_code == 0 {
              unsafe { CloseHandle(thread_handle) };
              unsafe { CloseHandle(process_handle) };
-             // Use \r\n to ensure it formats nicely if displayed in a message box or log
              return Err(format!("Injection failed: LoadLibraryW returned NULL in remote process.\nTarget PID: {}\nDLL Path: {}\n\nDIAGNOSTIC: Check if 'C:\\Users\\Public\\analyzer_beacon_{}.txt' exists. \nIf YES: DllMain ran but returned FALSE or crashed (panic caught).\nIf NO: LoadLibrary blocked by OS (AV/EDR/CFG/PPL).", pid, path_to_use.display(), pid));
         }
     } else {
-        // Timeout or failed to wait
-        // logging it but proceeding, though this usually implies something hung.
         eprintln!("Warning: WaitForSingleObject on injection thread timed out or failed (0x{:X})", wait_result);
     }
 
@@ -359,7 +331,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         return Err(format!("OpenProcess failed: {}", unsafe { GetLastError() }));
     }
 
-    // Architecture Check
     #[cfg(target_arch = "x86_64")]
     unsafe {
         let mut is_wow64: i32 = 0;
@@ -369,7 +340,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     }
 
-    // 1. Allocate Memory for the Image
     let optional_header = pe.optional_header();
     let image_size = optional_header.SizeOfImage as usize;
     let preferred_base = optional_header.ImageBase;
@@ -391,7 +361,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
 
     let delta = (remote_base as u64).wrapping_sub(preferred_base);
 
-    // 2. Copy Headers
     let headers_size = optional_header.SizeOfHeaders as usize;
     let mut bytes_written = 0;
     unsafe {
@@ -404,7 +373,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         );
     }
 
-    // 3. Map Sections
     for section in pe.section_headers() {
         let section_va = remote_base as usize + section.VirtualAddress as usize;
         let size_of_raw_data = section.SizeOfRawData as usize;
@@ -427,7 +395,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     }
 
-    // 4. Manual Relocations
     if delta != 0 {
         if let Ok(base_relocs) = pe.base_relocs() {
             for block in base_relocs.iter_blocks() {
@@ -484,7 +451,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     }
 
-    // 5. Build Import Table
     if let Ok(imports) = pe.imports() {
         for import_desc in imports {
             let module_name = match import_desc.dll_name() {
@@ -555,7 +521,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     }
 
-    // 6. Set Section Protections
     for section in pe.section_headers() {
         if section.SizeOfRawData == 0 { continue; }
         
@@ -586,20 +551,12 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         }
     }
 
-    // 7. Execute DllMain (and TLS callbacks)
     let entry_point = optional_header.AddressOfEntryPoint;
     let dll_main_addr = remote_base as usize + entry_point as usize;
 
-    // TLS callbacks: AddressOfCallBacks in TLS directory is a VA (not RVA).
-    // It points to a null-terminated array of callback function pointers.
-    // We need to apply the relocation delta to both the pointer to the array AND
-    // each callback address in the array (they were stored as absolute VAs at link time).
     let tls_callbacks_ptr = if let Ok(tls) = pe.tls() {
          let callback_array_va = tls.image().AddressOfCallBacks;
          if callback_array_va != 0 {
-             // The AddressOfCallBacks is a VA that was based on preferred ImageBase.
-             // After relocation, we need to apply delta to get the actual address in remote process.
-             // callback_array_va - preferred_base + remote_base = new address
              let relocated_array_ptr = (callback_array_va as i64 + delta as i64) as u64;
              relocated_array_ptr
          } else {
@@ -636,56 +593,8 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         );
     }
     
-    // x64 Shellcode - Properly handles TLS callbacks + DllMain with correct x64 ABI
-    // 
-    // Function signature for DllMain/TLS callbacks:
     //   BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
-    //   rcx = hinstDLL (dll_base)
-    //   rdx = fdwReason (1 = DLL_PROCESS_ATTACH)
-    //   r8  = lpvReserved (NULL for dynamic loads)
-    //
-    // ShellcodeData layout (passed in rcx by CreateRemoteThread):
-    //   +0x00: dll_base
-    //   +0x08: dll_main address
-    //   +0x10: tls_callbacks_ptr (pointer to null-terminated array of callback VAs)
-    //
-    // Shellcode (x64, proper ABI with 0x28 shadow space for alignment):
-    //   push rbx, rsi, rdi, r12, r13, r14, r15  ; save non-volatile registers
-    //   sub rsp, 0x28                           ; shadow space (32) + alignment (8) = 0x28
-    //   mov rbx, rcx                            ; rbx = pointer to ShellcodeData
-    //   mov r12, [rbx]                          ; r12 = dll_base
-    //   mov r13d, 1                             ; r13 = DLL_PROCESS_ATTACH
-    //   xor r14, r14                            ; r14 = NULL (lpvReserved)
-    //   
-    //   ; Call TLS callbacks if any
-    //   mov rsi, [rbx+0x10]                     ; rsi = tls_callbacks_ptr
-    //   test rsi, rsi                           ; if NULL, skip TLS
-    //   jz .call_dllmain
-    // .tls_loop:
-    //   mov rax, [rsi]                          ; rax = current callback
-    //   test rax, rax                           ; if NULL, end of array
-    //   jz .call_dllmain
-    //   mov rcx, r12                            ; arg1 = dll_base
-    //   mov rdx, r13                            ; arg2 = DLL_PROCESS_ATTACH  
-    //   mov r8, r14                             ; arg3 = NULL
-    //   call rax
-    //   add rsi, 8                              ; next callback
-    //   jmp .tls_loop
-    //
-    // .call_dllmain:
-    //   mov rax, [rbx+0x08]                     ; rax = dll_main
-    //   test rax, rax
-    //   jz .done
-    //   mov rcx, r12                            ; arg1 = dll_base
-    //   mov rdx, r13                            ; arg2 = DLL_PROCESS_ATTACH
-    //   mov r8, r14                             ; arg3 = NULL
-    //   call rax
-    // .done:
-    //   add rsp, 0x28
-    //   pop r15, r14, r13, r12, rdi, rsi, rbx
-    //   ret
     let shellcode: [u8; _] = [
-        // Prologue: save non-volatile registers and allocate shadow space
         0x53,                               // push rbx
         0x56,                               // push rsi
         0x57,                               // push rdi
@@ -695,18 +604,15 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         0x41, 0x57,                         // push r15
         0x48, 0x83, 0xEC, 0x28,             // sub rsp, 0x28 (shadow space + alignment)
         
-        // Load parameters from ShellcodeData
         0x48, 0x89, 0xCB,                   // mov rbx, rcx (rbx = &ShellcodeData)
         0x4C, 0x8B, 0x23,                   // mov r12, [rbx] (r12 = dll_base)
         0x41, 0xBD, 0x01, 0x00, 0x00, 0x00, // mov r13d, 1 (DLL_PROCESS_ATTACH)
         0x4D, 0x31, 0xF6,                   // xor r14, r14 (r14 = NULL for lpvReserved)
         
-        // TLS callbacks loop
         0x48, 0x8B, 0x73, 0x10,             // mov rsi, [rbx+0x10] (rsi = tls_callbacks_ptr)
         0x48, 0x85, 0xF6,                   // test rsi, rsi
         0x74, 0x18,                         // jz .call_dllmain (offset to dllmain code)
         
-        // .tls_loop:
         0x48, 0x8B, 0x06,                   // mov rax, [rsi]
         0x48, 0x85, 0xC0,                   // test rax, rax
         0x74, 0x10,                         // jz .call_dllmain
@@ -717,7 +623,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         0x48, 0x83, 0xC6, 0x08,             // add rsi, 8
         0xEB, 0xE8,                         // jmp .tls_loop
         
-        // .call_dllmain:
         0x48, 0x8B, 0x43, 0x08,             // mov rax, [rbx+0x08] (rax = dll_main)
         0x48, 0x85, 0xC0,                   // test rax, rax
         0x74, 0x0B,                         // jz .done
@@ -726,7 +631,6 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         0x4D, 0x89, 0xF0,                   // mov r8, r14 (arg3 = NULL)
         0xFF, 0xD0,                         // call rax
         
-        // .done: Epilogue
         0x48, 0x83, 0xC4, 0x28,             // add rsp, 0x28
         0x41, 0x5F,                         // pop r15
         0x41, 0x5E,                         // pop r14
@@ -775,15 +679,10 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
     Ok(process_handle)
 }
 
-/// Resolves API Set DLL names to their actual implementation DLLs.
-/// API Sets (api-ms-win-*) are virtual DLLs that forward to real implementations.
 fn resolve_api_set(dll_name: &str) -> String {
     let lower_name = dll_name.to_lowercase();
     
-    // Check if this is an API set DLL
     if lower_name.starts_with("api-ms-win-") || lower_name.starts_with("ext-ms-win-") {
-        // Common API set mappings to their actual implementations
-        // Most synchronization, memory, and core APIs are in kernelbase.dll or kernel32.dll
         if lower_name.contains("core-") || 
            lower_name.contains("synch-") || 
            lower_name.contains("processthreads-") ||
@@ -805,26 +704,21 @@ fn resolve_api_set(dll_name: &str) -> String {
             return "kernelbase.dll".to_string();
         }
         
-        // Security APIs
         if lower_name.contains("security-") {
             return "kernelbase.dll".to_string();
         }
         
-        // Registry APIs
         if lower_name.contains("registry-") {
             return "kernelbase.dll".to_string();
         }
         
-        // COM APIs
         if lower_name.contains("com-") {
             return "combase.dll".to_string();
         }
         
-        // Default fallback for unknown API sets
         return "kernelbase.dll".to_string();
     }
     
-    // Not an API set, return as-is
     dll_name.to_string()
 }
 
@@ -832,10 +726,8 @@ fn load_library_remote(process: windows_sys::Win32::Foundation::HANDLE, dll_name
     unsafe {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
         
-        // Resolve API set DLLs to their actual implementations
         let resolved_dll_name = resolve_api_set(dll_name);
         
-        // Check if the resolved DLL is already loaded in the target process
         let modules = get_modules_for_process(GetProcessId(process))?;
         for m in &modules {
             if m.name.eq_ignore_ascii_case(&resolved_dll_name) {
@@ -884,7 +776,6 @@ fn load_library_remote(process: windows_sys::Win32::Foundation::HANDLE, dll_name
             return Err(format!("LoadLibraryW returned NULL for {} (resolved from {})", resolved_dll_name, dll_name));
         }
         
-        // Re-scan modules to find the newly loaded DLL
         let modules = get_modules_for_process(GetProcessId(process))?;
         for m in modules {
             if m.name.eq_ignore_ascii_case(&resolved_dll_name) {

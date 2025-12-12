@@ -1,11 +1,7 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
-// This module is responsible for periodically scanning the process's memory
 // for strings, which can reveal interesting information about a program's
-// behavior, such as hidden commands, URLs, or configuration data.
-// It will run in a background thread.
 use shared::logging::{LogLevel, LogEvent};
 use crate::{log_event, ReentrancyGuard};
 use std::collections::HashSet;
@@ -19,13 +15,11 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 const MIN_STRING_LEN: usize = 8; // Minimum length for a sequence of bytes to be considered a string.
 
-/// Scans a memory region for ASCII and UTF-16 strings.
 fn scan_region_for_strings(
     region: &[u8],
     base_address: usize,
     found_strings: &mut HashSet<String>,
 ) {
-    // ASCII scan
     for window in region.windows(MIN_STRING_LEN) {
         if window.iter().all(|&c| c.is_ascii_graphic() || c == b' ') {
             if let Ok(s) = std::str::from_utf8(window) {
@@ -44,7 +38,6 @@ fn scan_region_for_strings(
         }
     }
 
-    // UTF-16 scan
     if region.len() >= MIN_STRING_LEN * 2 {
         let u16_region: &[u16] = unsafe {
             core::slice::from_raw_parts(region.as_ptr() as *const u16, region.len() / 2)
@@ -72,8 +65,6 @@ fn scan_region_for_strings(
     }
 }
 
-/// The main loop for the string dumper thread.
-/// Iterates through all committed memory regions and scans them.
 fn string_dumper_main(found_strings: Arc<Mutex<HashSet<String>>>) {
     let process_handle = unsafe { GetCurrentProcess() };
     let mut current_address: usize = 0;
@@ -113,7 +104,6 @@ fn string_dumper_main(found_strings: Arc<Mutex<HashSet<String>>>) {
 
 
 
-/// Spawns the string dumper thread.
 pub fn start_string_dumper() {
     log_event(LogLevel::Info, LogEvent::MemoryScan {
         status: "Starting background string dumper...".to_string(),
@@ -126,8 +116,6 @@ pub fn start_string_dumper() {
         loop {
             let found_strings_clone = Arc::clone(&found_strings);
             string_dumper_main(found_strings_clone);
-            // Adjust the sleep duration based on how frequently you want to scan.
-            // A full memory scan can be intensive.
             thread::sleep(Duration::from_secs(300)); // e.g., every 5 minutes
         }
     });

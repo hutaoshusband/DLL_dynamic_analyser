@@ -1,11 +1,9 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// This enum is now the single source of truth for log levels.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Fatal = 0,
@@ -17,7 +15,6 @@ pub enum LogLevel {
     Trace = 6,
 }
 
-// This struct is now the single source of truth for PE section info.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SectionInfo {
     pub name: String,
@@ -26,12 +23,9 @@ pub struct SectionInfo {
     pub characteristics: u32,
 }
 
-// This enum is now the single source of truth for all possible log events.
-// It combines the variants from both the old loader and client definitions.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "event_type", content = "details")]
 pub enum LogEvent {
-    // Variants from both
     Initialization { status: String },
     Shutdown { status: String },
     Error { source: String, message: String },
@@ -55,25 +49,21 @@ pub enum LogEvent {
     },
     ProcessEnumeration { function_name: String, parameters: serde_json::Value },
     MemoryScan { status: String, result: String },
-    // Client-specific variants
     VmpTrace { message: String, details: serde_json::Value },
     StaticAnalysis { finding: String, details: String },
     StringDump { address: usize, value: String, encoding: String },
     UnpackerActivity { source_address: usize, finding: String, details: String },
     FullEntropyResult { module_name: String, entropy: Vec<f32> },
     YaraMatch { rule_name: String, address: usize, region_size: usize, metadata: String },
-    // Loader-specific variant
     Message(String),
 }
 
-// Custom PartialEq to handle JSON value comparison
 impl PartialEq for LogEvent {
     fn eq(&self, other: &Self) -> bool {
         serde_json::to_string(self).unwrap_or_default() == serde_json::to_string(other).unwrap_or_default()
     }
 }
 
-// This struct is now the single source of truth for a log entry.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogEntry {
     #[serde(with = "chrono::serde::ts_seconds")]
@@ -89,14 +79,12 @@ pub struct LogEntry {
     pub origin_suspicious: bool,
 }
 
-// Custom PartialEq for deduplication logic in the loader
 impl PartialEq for LogEntry {
     fn eq(&self, other: &Self) -> bool {
         self.level == other.level && self.event == other.event
     }
 }
 
-// Helper function for creating log entries in the loader
 impl LogEntry {
     pub fn new_from_loader(level: LogLevel, event: LogEvent) -> Self {
         Self {

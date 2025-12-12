@@ -6,12 +6,10 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("all_rules.yar");
     
-    // Path to the yara directory relative to the client crate root
     let yara_dir = Path::new("..").join("yara");
     
     let mut all_rules = String::new();
     
-    // Function to recursively visit directories and read .yar files
     fn visit_dirs(dir: &Path, all_rules: &mut String) -> std::io::Result<()> {
         if dir.is_dir() {
             for entry in fs::read_dir(dir)? {
@@ -21,7 +19,6 @@ fn main() {
                     visit_dirs(&path, all_rules)?;
                 } else if let Some(extension) = path.extension() {
                     if extension == "yar" || extension == "yara" {
-                        // Read file content
                         if let Ok(content) = fs::read_to_string(&path) {
                             all_rules.push_str(&format!("// File: {}\n", path.display()));
                             all_rules.push_str(&content);
@@ -37,14 +34,12 @@ fn main() {
     if yara_dir.exists() {
         println!("cargo:rerun-if-changed={}", yara_dir.display());
         if let Err(e) = visit_dirs(&yara_dir, &mut all_rules) {
-             // Don't fail the build if yara folder has issues, just warn
              println!("cargo:warning=Failed to read YARA rules: {}", e);
         }
     } else {
         println!("cargo:warning=YARA directory not found at {}", yara_dir.display());
     }
 
-    // If no rules were found, write an empty file or a placeholder
     if all_rules.is_empty() {
         all_rules.push_str("// No YARA rules found\n");
     }

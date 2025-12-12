@@ -1,8 +1,6 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 
-// monitor_lib/src/vmp_dumper.rs
 #![allow(dead_code, unused_variables)]
 
 use shared::logging::{LogLevel, LogEvent};
@@ -33,7 +31,6 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess};
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
 
-// Data structures for tracking memory and VMP targets
 #[derive(Debug, Clone)]
 pub struct AllocatedRegion {
     pub address: usize,
@@ -51,7 +48,6 @@ pub enum DumpReason {
     Manual,
 }
 
-/// Represents the type of protector detected on a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectorType {
     VMProtect,
@@ -97,14 +93,12 @@ impl VmpState {
 
 static VMP_STATE: Lazy<Mutex<VmpState>> = Lazy::new(|| Mutex::new(VmpState::new()));
 
-// Public API for the dumper
 pub fn track_memory_allocation(
     address: usize,
     size: usize,
     protection: u32,
     stack_trace: Vec<String>,
 ) {
-    // If the newly allocated memory is executable, analyze it for signs of unpacking.
     let is_executable = (protection & PAGE_EXECUTE) != 0
         || (protection & PAGE_EXECUTE_READ) != 0
         || (protection & PAGE_EXECUTE_READWRITE) != 0
@@ -154,14 +148,12 @@ pub fn track_memory_allocation(
     }
 }
 
-/// Analyzes a slice of bytes from newly executable memory for signs of unpacking.
 fn analyze_unpacked_code(code: &[u8], base_address: usize) {
     const BITNESS: u32 = 64;
     let mut decoder = Decoder::with_ip(BITNESS, code, base_address as u64, DecoderOptions::NONE);
     let _formatter = NasmFormatter::new();
 
     for instr in decoder.iter().take(10) { // Analyze first 10 instructions
-        // Check for popad (0x61), a common instruction at the end of an unpacker stub.
         if instr.code() == iced_x86::Code::Popad {
             SUSPICION_SCORE.fetch_add(5, Ordering::Relaxed);
             log_event(
@@ -174,7 +166,6 @@ fn analyze_unpacked_code(code: &[u8], base_address: usize) {
             );
         }
 
-        // Check for jumps or calls, which might lead to the Original Entry Point (OEP).
         if instr.is_jcc_short_or_near() || instr.is_jmp_short_or_near() || instr.is_call_near() {
             let target_addr = instr.near_branch_target();
             SUSPICION_SCORE.fetch_add(3, Ordering::Relaxed);
@@ -244,7 +235,6 @@ pub fn handle_command(command: &str) {
     }
 }
 
-// Internal implementation
 fn scan_for_vmp_modules() {
     let modules = unsafe { crate::scanner::enumerate_modules() };
     let mut state = match VMP_STATE.lock() {
@@ -280,7 +270,6 @@ fn scan_for_vmp_modules() {
     }
 }
 
-/// Helper function to read a structure from the current process's memory.
 unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, ()> {
     let mut buffer: T = mem::zeroed();
     let process_handle = GetCurrentProcess();
@@ -301,8 +290,6 @@ unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, ()> {
     }
 }
 
-/// Detects protector type by scanning PE section headers.
-/// Returns Some(ProtectorType) if a known protector is detected.
 fn detect_protector(base_address: usize) -> Option<ProtectorType> {
     unsafe {
         let Ok(dos_header) = read_memory::<IMAGE_DOS_HEADER>(base_address) else {
@@ -336,7 +323,6 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
             let section_name = String::from_utf8_lossy(&section_header.Name);
             let section_name_clean = section_name.trim_matches('\0').to_lowercase();
 
-            // VMProtect: .vmp0, .vmp1, .vmp2, etc.
             if section_name_clean.starts_with(".vmp") {
                 log_event(
                     LogLevel::Debug,
@@ -348,7 +334,6 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
                 return Some(ProtectorType::VMProtect);
             }
 
-            // Enigma: .enigma1, .enigma2
             if section_name_clean.starts_with(".enigma") {
                 log_event(
                     LogLevel::Debug,
@@ -360,7 +345,6 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
                 return Some(ProtectorType::Enigma);
             }
 
-            // Themida/Winlicense: .themida, .winlice
             if section_name_clean.starts_with(".themida") || section_name_clean.starts_with(".winlice") {
                 log_event(
                     LogLevel::Debug,
@@ -377,8 +361,6 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
 }
 
 fn analyze_and_dump_if_ready() {
-    // This logic can be expanded to automatically dump based on certain criteria,
-    // e.g., after observing specific API calls that suggest unpacking is complete.
 }
 
 fn dump_all_targets(reason: DumpReason) {
@@ -427,15 +409,11 @@ fn get_dump_path() -> Option<PathBuf> {
     None
 }
 
-/// Reconstructs a PE file from memory and dumps it to disk.
-/// This is superior to a raw memory dump as it rebuilds the file according
-/// to its PE headers, resulting in a cleaner, more analyzable file.
 fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
     let base_address = target.base_address;
     let process_handle = unsafe { GetCurrentProcess() };
 
     unsafe {
-        // 1. Read headers from memory
         let Ok(dos_header) = read_memory::<IMAGE_DOS_HEADER>(base_address) else {
             log_event(LogLevel::Error, LogEvent::VmpTrace {
                 message: "Failed to read DOS header for dumping.".to_string(),
@@ -453,12 +431,9 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
             return;
         };
 
-        // 2. Allocate a buffer for the reconstructed PE file.
-        // SizeOfImage is the size of the PE file in memory, which is what we want to reconstruct.
         let file_size = nt_headers.OptionalHeader.SizeOfImage as usize;
         let mut file_buffer = vec![0u8; file_size];
 
-        // 3. Copy the PE headers into the buffer.
         let header_size = (dos_header.e_lfanew as usize) + mem::size_of::<IMAGE_NT_HEADERS64>();
         let mut headers_buffer = vec![0u8; header_size];
         if ReadProcessMemory(
@@ -477,7 +452,6 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
         }
         file_buffer[..header_size].copy_from_slice(&headers_buffer);
 
-        // 4. Iterate through sections, copy them from memory into the buffer at the correct file offset.
         let number_of_sections = nt_headers.FileHeader.NumberOfSections;
         let section_header_addr = nt_headers_addr + mem::size_of::<IMAGE_NT_HEADERS64>();
 
@@ -516,7 +490,6 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
             }
         }
 
-        // 5. Write the reconstructed buffer to disk.
         let dump_path = match get_dump_path() {
             Some(p) => p,
             None => return,

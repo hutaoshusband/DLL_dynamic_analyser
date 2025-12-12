@@ -1,13 +1,5 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-//! Comprehensive crash logging module.
-//! 
-//! This module provides detailed crash logging with:
-//! - Panic hooks for Rust panics
-//! - MessageBox display on crash
-//! - Detailed log files in logs/ folder
-//! - Register dumps, stack traces, module info
 
 #![allow(dead_code)]
 
@@ -32,33 +24,20 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThrea
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
 use crate::ReentrancyGuard;
 
-// ============================================================================
-// Global State
-// ============================================================================
 
-/// Path to the logs directory (set from loader_path config)
 static LOG_DIR: OnceCell<PathBuf> = OnceCell::new();
 
-/// Recent initialization steps (circular buffer for context)
 static INIT_STEPS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Flag to prevent recursive logging during crash handling
 static IN_CRASH_HANDLER: AtomicBool = AtomicBool::new(false);
 
-/// Maximum number of init steps to keep
 const MAX_INIT_STEPS: usize = 50;
 
-// ============================================================================
-// Initialization
-// ============================================================================
 
-/// Initialize the crash logger with the base path for logs.
-/// Call this early in DllMain before any other initialization.
 pub fn init(loader_path: &str) {
     let base_path = PathBuf::from(loader_path);
     let logs_dir = base_path.join("logs");
     
-    // Create logs directory
     let _ = fs::create_dir_all(&logs_dir);
     
     let _ = LOG_DIR.set(logs_dir);
@@ -66,14 +45,12 @@ pub fn init(loader_path: &str) {
     log_init_step("Crash logger initialized");
 }
 
-/// Get the logs directory path, with fallback to temp if not initialized
 fn get_log_dir() -> PathBuf {
     LOG_DIR.get()
         .cloned()
         .unwrap_or_else(|| std::env::temp_dir())
 }
 
-/// Install the Rust panic hook to catch panics
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
         let pid = unsafe { GetCurrentProcessId() };
@@ -102,10 +79,8 @@ pub fn install_panic_hook() {
             timestamp, pid, tid, location, payload
         );
         
-        // Log to file
         log_to_file("panic", &message);
         
-        // Show MessageBox
         show_crash_message_box("RUST PANIC", &format!(
             "A panic occurred in the DLL!\n\n\
             Location: {}\n\
@@ -118,11 +93,7 @@ pub fn install_panic_hook() {
     log_init_step("Panic hook installed");
 }
 
-// ============================================================================
-// Step Logging
-// ============================================================================
 
-/// Log an initialization step. These are kept in memory for crash context.
 pub fn log_init_step(step: &str) {
     let timestamp = Local::now().format("%H:%M:%S%.3f");
     let pid = unsafe { GetCurrentProcessId() };
@@ -130,20 +101,16 @@ pub fn log_init_step(step: &str) {
     
     let entry = format!("[{}] [PID:{} TID:{}] {}", timestamp, pid, tid, step);
     
-    // Add to in-memory buffer
     if let Ok(mut steps) = INIT_STEPS.lock() {
         steps.push(entry.clone());
-        // Keep only the last N steps
         if steps.len() > MAX_INIT_STEPS {
             steps.remove(0);
         }
     }
     
-    // Also write to init log file
     log_to_file("init", &entry);
 }
 
-/// Log a hook installation with success/failure status
 pub fn log_hook(hook_name: &str, success: bool, address: Option<usize>, details: &str) {
     let status = if success { "SUCCESS" } else { "FAILED" };
     let addr_str = address.map(|a| format!(" at {:#x}", a)).unwrap_or_default();
@@ -156,14 +123,8 @@ pub fn log_hook(hook_name: &str, success: bool, address: Option<usize>, details:
     log_init_step(&message);
 }
 
-// ============================================================================
-// Crash Logging
-// ============================================================================
 
-/// Main crash logging function called from VEH
-/// This logs detailed crash info and shows a MessageBox
 pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
-    // Prevent recursive crashes during logging
     if IN_CRASH_HANDLER.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -197,7 +158,6 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
             crash_info.push_str(&format!("Address: {:?}\n", exception_address));
             crash_info.push_str(&format!("Flags: 0x{:08X}\n", exception_flags));
             
-            // Access violation details
             if exception_code == 0xC0000005 && record.NumberParameters >= 2 {
                 let access_type = record.ExceptionInformation[0];
                 let access_address = record.ExceptionInformation[1];
@@ -213,7 +173,6 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
                 ));
             }
             
-            // Find which module crashed
             if let Some((name, base, offset)) = get_module_for_address(exception_address as usize) {
                 crash_info.push_str(&format!(
                     "Module: {} (base: {:#x}, offset: +{:#x})\n",
@@ -225,7 +184,6 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
             crash_info.push_str("\n");
         }
         
-        // Register dump
         if !context_record.is_null() {
             #[cfg(target_arch = "x86_64")]
             {
@@ -244,7 +202,6 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
                 crash_info.push_str(&format!("ES: {:04x}  FS: {:04x}  GS: {:04x}\n", ctx.SegEs, ctx.SegFs, ctx.SegGs));
                 crash_info.push_str("\n");
                 
-                // Debug registers (relevant for hardware BP issues)
                 crash_info.push_str("--- DEBUG REGISTERS ---\n");
                 crash_info.push_str(&format!("DR0: {:#018x}  DR1: {:#018x}\n", ctx.Dr0, ctx.Dr1));
                 crash_info.push_str(&format!("DR2: {:#018x}  DR3: {:#018x}\n", ctx.Dr2, ctx.Dr3));
@@ -254,7 +211,6 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
         }
     }
     
-    // Recent initialization steps
     crash_info.push_str("--- RECENT INIT STEPS ---\n");
     if let Ok(steps) = INIT_STEPS.lock() {
         let start = if steps.len() > 15 { steps.len() - 15 } else { 0 };
@@ -266,10 +222,8 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
     
     crash_info.push_str("============================================================\n");
     
-    // Write to file
     log_to_file("crash", &crash_info);
     
-    // Build MessageBox content (shorter version)
     let exception_name = if !exception_info.is_null() && !(*exception_info).ExceptionRecord.is_null() {
         let code = (*(*exception_info).ExceptionRecord).ExceptionCode as u32;
         get_exception_name(code)
@@ -305,11 +259,7 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
     IN_CRASH_HANDLER.store(false, Ordering::SeqCst);
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
 
-/// Get human-readable exception name
 fn get_exception_name(code: u32) -> &'static str {
     match code {
         0xC0000005 => "ACCESS_VIOLATION",
@@ -336,7 +286,6 @@ fn get_exception_name(code: u32) -> &'static str {
     }
 }
 
-/// Find which module contains a given address
 fn get_module_for_address(addr: usize) -> Option<(String, usize, usize)> {
     unsafe {
         let pid = GetCurrentProcessId();
@@ -377,9 +326,7 @@ fn get_module_for_address(addr: usize) -> Option<(String, usize, usize)> {
     }
 }
 
-/// Write a message to a log file
 fn log_to_file(log_type: &str, message: &str) {
-    // Prevent recursive logging if we hooked CreateFile/WriteFile
     let _guard = ReentrancyGuard::new();
 
     let log_dir = get_log_dir();
@@ -399,7 +346,6 @@ fn log_to_file(log_type: &str, message: &str) {
     }
 }
 
-/// Show a MessageBox with crash information
 fn show_crash_message_box(title: &str, message: &str) {
     let title_wide = match U16CString::from_str(title) {
         Ok(s) => s,
@@ -421,11 +367,7 @@ fn show_crash_message_box(title: &str, message: &str) {
     }
 }
 
-// ============================================================================
-// Quick Debug Log (for use before crash_logger is initialized)
-// ============================================================================
 
-/// Early debug log to temp directory (for use before crash_logger is fully initialized)
 pub fn early_debug_log(message: &str) {
     let _guard = ReentrancyGuard::new();
     let pid = unsafe { GetCurrentProcessId() };

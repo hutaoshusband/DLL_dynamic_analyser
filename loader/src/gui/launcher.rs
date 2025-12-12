@@ -1,3 +1,5 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
+
 use std::sync::atomic::Ordering;
 
 use eframe::egui;
@@ -17,7 +19,6 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
         ui.heading("Analysis Launcher");
         ui.separator();
 
-        // --- Target Selection ---
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.heading("Target Selection");
@@ -32,12 +33,10 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
             });
         });
 
-        // --- Injection Controls ---
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.heading("Injection Controls");
 
-                // Preset selection
                 ui.horizontal(|ui| {
                     ui.label("Monitoring Preset:");
                     let mut preset_changed = false;
@@ -57,7 +56,6 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
 
                 ui.separator();
 
-                // Action buttons
                 ui.horizontal(|ui| {
                     let is_running = state.is_process_running.load(Ordering::SeqCst);
                     let can_inject = !is_running && state.dll_path.is_some();

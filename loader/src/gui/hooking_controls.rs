@@ -1,10 +1,11 @@
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
+
 use eframe::egui::{self, Ui};
 use shared::Command;
 use std::sync::atomic::Ordering;
 
 use crate::app::state::AppState;
 
-// Custom switch widget
 fn switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let desired_size = ui.spacing().interact_size.y * egui::vec2(1.8, 1.0);
     let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
@@ -48,7 +49,6 @@ pub fn render_hooking_controls_tab(ui: &mut Ui, state: &mut AppState) {
     let is_running = state.is_process_running.load(Ordering::SeqCst);
 
     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-        // Card for General Settings
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.heading("General Settings");
@@ -87,7 +87,6 @@ pub fn render_hooking_controls_tab(ui: &mut Ui, state: &mut AppState) {
 
         ui.add_space(10.0);
 
-        // Card for YARA Scanning
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.heading("YARA Scanning");
@@ -118,7 +117,6 @@ pub fn render_hooking_controls_tab(ui: &mut Ui, state: &mut AppState) {
 
         ui.add_space(10.0);
 
-        // Card for Individual Hooks
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.heading("Individual Hooks");

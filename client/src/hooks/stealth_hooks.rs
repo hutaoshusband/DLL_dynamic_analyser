@@ -1,5 +1,4 @@
-// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/CodeConfuser.dev
-// All rights reserved.
+// Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::ffi::c_void;
@@ -11,12 +10,9 @@ use crate::{log_event, ReentrancyGuard};
 use shared::logging::{LogLevel, LogEvent};
 use serde_json::json;
 
-// Define EXCEPTION_SINGLE_STEP manually if not found (it's usually 0x80000004)
 const EXCEPTION_SINGLE_STEP: u32 = 0x80000004;
 const CONTEXT_DEBUG_REGISTERS: u32 = 0x00100010; // amd64
 
-// Global array to track which addresses we have hooked with which DR register.
-// 0 = unused.
 static DR0_HOOK: AtomicUsize = AtomicUsize::new(0);
 static DR1_HOOK: AtomicUsize = AtomicUsize::new(0);
 static DR2_HOOK: AtomicUsize = AtomicUsize::new(0);
@@ -53,11 +49,8 @@ unsafe fn apply_hw_bp_to_thread(thread: windows_sys::Win32::Foundation::HANDLE, 
         _ => return false,
     }
 
-    // Enable local breakpoint (Lx)
     ctx.Dr7 |= 1 << (dr_index * 2);
-    // Clear R/W bits to 00 (Execute) for this register
     ctx.Dr7 &= !(0b11 << (16 + dr_index * 4));
-    // Clear Len bits to 00 (1 byte) for this register
     ctx.Dr7 &= !(0b11 << (18 + dr_index * 4));
 
     if SetThreadContext(thread, &ctx) == 0 {
@@ -67,7 +60,6 @@ unsafe fn apply_hw_bp_to_thread(thread: windows_sys::Win32::Foundation::HANDLE, 
     true
 }
 
-// The VEH Handler
 pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION_POINTERS) -> i32 {
     if exception_info.is_null() {
         return 0; // EXCEPTION_CONTINUE_SEARCH
@@ -79,7 +71,6 @@ pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION
     if record.ExceptionCode as u32 == EXCEPTION_SINGLE_STEP {
         let exception_addr = record.ExceptionAddress as usize;
 
-        // Check if this matches one of our hooks
         let mut hit_index = None;
         if exception_addr == DR0_HOOK.load(Ordering::SeqCst) { hit_index = Some(0); }
         else if exception_addr == DR1_HOOK.load(Ordering::SeqCst) { hit_index = Some(1); }
@@ -87,9 +78,6 @@ pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION
         else if exception_addr == DR3_HOOK.load(Ordering::SeqCst) { hit_index = Some(3); }
 
         if let Some(index) = hit_index {
-            // It's our hook!
-            // Use ReentrancyGuard to prevent infinite loops if the logging mechanism itself
-            // triggers the hook (e.g. via memory allocation or time checks).
             if let Some(_guard) = ReentrancyGuard::new() {
                 log_event(
                     LogLevel::Warn,
@@ -106,7 +94,6 @@ pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION
                 );
             }
 
-            // Important: Set Resume Flag (RF) in EFLAGS (bit 16)
             context.EFlags |= 0x10000;
 
             return -1; // EXCEPTION_CONTINUE_EXECUTION
@@ -120,7 +107,6 @@ pub unsafe fn initialize_stealth_hooks() {
     crate::crash_logger::log_init_step("Stealth hooks: Starting initialization");
     crate::crash_logger::log_hook("stealth_veh_handler", true, None, "Registering VEH handler");
     
-    // Register VEH
     let handle = AddVectoredExceptionHandler(1, Some(stealth_veh_handler));
     if handle.is_null() {
         crate::crash_logger::log_hook("stealth_veh_handler", false, None, "VEH registration failed");
@@ -132,7 +118,6 @@ pub unsafe fn initialize_stealth_hooks() {
     }
     crate::crash_logger::log_hook("stealth_veh_handler", true, None, "VEH registered successfully");
 
-    // Get ntdll handle
     crate::crash_logger::log_init_step("Stealth hooks: Getting ntdll.dll handle");
     let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
         widestring::U16CString::from_str("ntdll.dll").unwrap().as_ptr()
@@ -141,7 +126,6 @@ pub unsafe fn initialize_stealth_hooks() {
     if ntdll != 0 {
         crate::crash_logger::log_init_step(&format!("Stealth hooks: ntdll.dll at {:#x}", ntdll));
         
-        // Hook NtQuerySystemInformation
         crate::crash_logger::log_init_step("Stealth hooks: Resolving NtQuerySystemInformation");
         let func_name = b"NtQuerySystemInformation\0";
         if let Some(addr) = windows_sys::Win32::System::LibraryLoader::GetProcAddress(ntdll, func_name.as_ptr()) {
