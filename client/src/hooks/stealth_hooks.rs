@@ -7,7 +7,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, GetThreadContext, SetThreadContext, CONTEXT, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentThread, GetCurrentProcessId};
-use crate::log_event;
+use crate::{log_event, ReentrancyGuard};
 use shared::logging::{LogLevel, LogEvent};
 use serde_json::json;
 
@@ -88,19 +88,23 @@ pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION
 
         if let Some(index) = hit_index {
             // It's our hook!
-            log_event(
-                LogLevel::Warn,
-                LogEvent::ApiHook {
-                    function_name: format!("StealthHook[Dr{}]", index),
-                    parameters: json!({
-                        "address": format!("{:#x}", exception_addr),
-                        "note": "Hardware Breakpoint Hit - Stealth Hook",
-                        "rcx": format!("{:#x}", context.Rcx),
-                        "rdx": format!("{:#x}", context.Rdx),
-                    }),
-                    stack_trace: None,
-                },
-            );
+            // Use ReentrancyGuard to prevent infinite loops if the logging mechanism itself
+            // triggers the hook (e.g. via memory allocation or time checks).
+            if let Some(_guard) = ReentrancyGuard::new() {
+                log_event(
+                    LogLevel::Warn,
+                    LogEvent::ApiHook {
+                        function_name: format!("StealthHook[Dr{}]", index),
+                        parameters: json!({
+                            "address": format!("{:#x}", exception_addr),
+                            "note": "Hardware Breakpoint Hit - Stealth Hook",
+                            "rcx": format!("{:#x}", context.Rcx),
+                            "rdx": format!("{:#x}", context.Rdx),
+                        }),
+                        stack_trace: None,
+                    },
+                );
+            }
 
             // Important: Set Resume Flag (RF) in EFLAGS (bit 16)
             context.EFlags |= 0x10000;

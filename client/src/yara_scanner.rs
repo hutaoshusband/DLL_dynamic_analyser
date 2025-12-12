@@ -10,7 +10,7 @@ use windows_sys::Win32::System::Memory::{
     VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_NOACCESS, PAGE_GUARD,
 };
 use std::ffi::c_void;
-use crate::log_event;
+use crate::{log_event, ReentrancyGuard};
 use shared::logging::{LogLevel, LogEvent};
 use serde_json::json;
 
@@ -95,44 +95,69 @@ impl YaraScanner {
                 
                 // 100MB limit per region
                 if size > 0 && size < 100 * 1024 * 1024 {
-                     let data = unsafe { std::slice::from_raw_parts(ptr, size) };
-                     
-                     // yara-x scan api
-                     if let Ok(results) = scanner.scan(data) {
-                         for match_rule in results.matching_rules() {
-                             let rule_name = match_rule.identifier();
-                             let meta: serde_json::Value = match_rule.metadata().map(|(key, value)| {
-                                 // yara-x metadata value handling
-                                 let val_str = match value {
-                                     yara_x::MetaValue::Integer(i) => i.to_string(),
-                                     yara_x::MetaValue::Float(f) => f.to_string(),
-                                     yara_x::MetaValue::Bool(b) => b.to_string(),
-                                     yara_x::MetaValue::String(s) => s.to_string(),
-                                     yara_x::MetaValue::Bytes(b) => format!("{:?}", b),
-                                 };
-                                 (key.to_string(), json!(val_str))
-                             }).collect();
+                    // Use ReentrancyGuard while scanning to prevent potential recursion if YARA scan triggers hooks
+                    // (e.g. if it causes memory allocation or file access internally that is hooked)
+                    if let Some(_guard) = ReentrancyGuard::new() {
+                        // Safety: we checked that the memory is committed and accessible.
+                        // However, memory state can change in a multi-threaded process.
+                        // Accessing memory in a running process is inherently risky (race conditions).
+                        // std::slice::from_raw_parts is unsafe, but we are doing our best with VirtualQuery.
+                        let data = unsafe { std::slice::from_raw_parts(ptr, size) };
+                        
+                        // yara-x scan api
+                        // We wrap the scan in a catch_unwind-like block if possible, but yara-x is pure Rust.
+                        // If yara-x panics, it will bring down the thread (or process).
+                        // We rely on yara-x robustness.
+                        match scanner.scan(data) {
+                            Ok(results) => {
+                                for match_rule in results.matching_rules() {
+                                    let rule_name = match_rule.identifier();
+                                    let meta: serde_json::Value = match_rule.metadata().map(|(key, value)| {
+                                        // yara-x metadata value handling
+                                        let val_str = match value {
+                                            yara_x::MetaValue::Integer(i) => i.to_string(),
+                                            yara_x::MetaValue::Float(f) => f.to_string(),
+                                            yara_x::MetaValue::Bool(b) => b.to_string(),
+                                            yara_x::MetaValue::String(s) => s.to_string(),
+                                            yara_x::MetaValue::Bytes(b) => format!("{:?}", b),
+                                        };
+                                        (key.to_string(), json!(val_str))
+                                    }).collect();
 
-                             log_event(
-                                 LogLevel::Warn, // YARA hit is usually significant
-                                 LogEvent::MemoryScan {
-                                     status: "YARA Match".to_string(),
-                                     result: format!(
-                                         "Rule: {} @ Address: {:#x} (Region Size: {:#x})", 
-                                         rule_name, address, size
-                                     ),
-                                 },
-                             );
-                             
-                             // Log detailed structured info too if needed
-                             log_event(
-                                 LogLevel::Info,
-                                 LogEvent::StaticAnalysis {
-                                    finding: format!("YARA Match: {}", rule_name),
-                                    details: meta.to_string(),
-                                 }
-                             );
-                         }
+                                    log_event(
+                                        LogLevel::Warn, // YARA hit is usually significant
+                                        LogEvent::MemoryScan {
+                                            status: "YARA Match".to_string(),
+                                            result: format!(
+                                                "Rule: {} @ Address: {:#x} (Region Size: {:#x})", 
+                                                rule_name, address, size
+                                            ),
+                                        },
+                                    );
+                                    
+                                    // Log detailed structured info too if needed
+                                    log_event(
+                                        LogLevel::Info,
+                                        LogEvent::StaticAnalysis {
+                                           finding: format!("YARA Match: {}", rule_name),
+                                           details: meta.to_string(),
+                                        }
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                // Log scan errors
+                                log_event(
+                                    LogLevel::Debug,
+                                    LogEvent::Error {
+                                        source: "YaraScanner".to_string(),
+                                        message: format!("Scan failed for region {:#x} (size {:#x}): {}", address, size, e),
+                                    },
+                                );
+                            }
+                        }
+                     } else {
+                         // Failed to acquire reentrancy guard, skipping scan for this region to avoid recursion loop
                      }
                 }
             }

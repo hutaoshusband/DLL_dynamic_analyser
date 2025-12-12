@@ -29,6 +29,11 @@ pub struct App {
     log_receiver: mpsc::Receiver<String>,
     is_maximized: bool,
     last_window_rect: Option<egui::Rect>,
+    
+    // Animation
+    startup_time: Option<f64>,
+    animation_finished: bool,
+    frame_count: usize,
 }
 
 impl App {
@@ -39,6 +44,9 @@ impl App {
             log_receiver,
             is_maximized: false,
             last_window_rect: None,
+            startup_time: None,
+            animation_finished: false,
+            frame_count: 0,
         }
     }
 }
@@ -74,9 +82,81 @@ impl eframe::App for App {
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+        // --- Startup Animation ---
+        
+        let mut target_max_rect = ctx.input(|i| i.screen_rect());
+        // Fallback if screen_rect is tiny (uninitialized backend sometimes returns 0x0 or 1x1)
+        if target_max_rect.width() < 800.0 || target_max_rect.height() < 600.0 {
+             // Try to use the viewport rect if it's larger, or default to a standard FHD layout assumption
+             if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+                 if rect.width() > 800.0 {
+                     target_max_rect = rect;
+                 } else {
+                     // Last resort fallback
+                     target_max_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                 }
+             }
+        }
 
-        // --- Window Management Logic ---
+        // 0. Warmup phase: Wait for a few frames to let the OS/Window Monitor info stabilize
+        self.frame_count += 1;
+        if self.frame_count < 10 { // Increased warmup to 10 frames to be safe
+             // Force "Start" state during warmup
+             let start_w = 10.0; // Start REALLY small as requested ("fast nichts")
+             let start_h = 10.0;
+             let center = target_max_rect.center();
+             let start_pos = center - egui::vec2(start_w, start_h) / 2.0;
 
+             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([start_w, start_h].into()));
+             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(start_pos));
+             
+             ctx.request_repaint();
+             // Do NOT return; let the UI render (even if crushed) to ensure the backend is alive.
+             // We can optionally suppress drawing content if it looks bad:
+        } else if !self.animation_finished {
+             let now = ctx.input(|i| i.time);
+             
+             // Initialize start time on the first valid frame
+             if self.startup_time.is_none() {
+                 self.startup_time = Some(now);
+             }
+             
+             let start = self.startup_time.unwrap();
+             let duration = 0.6; // 600ms
+             let t_raw = ((now - start) / duration).clamp(0.0, 1.0) as f32;
+             
+             // Cubic Ease Out
+             let t = 1.0 - (1.0 - t_raw).powi(3);
+
+             if t_raw >= 1.0 {
+                 self.animation_finished = true;
+                 
+                 // Finalize Maximize
+                 self.is_maximized = true; // Updates logic state
+                 
+                 // Apply final maximized state (Custom Transparent Maximize)
+                 ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
+                 let safe_rect = egui::Rect::from_min_size(target_max_rect.min, target_max_rect.size() - egui::vec2(0.0, 1.0));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(safe_rect.min));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(safe_rect.size()));
+             } else {
+                  // Animation Step
+                 let center = target_max_rect.center();
+                 let target_size = target_max_rect.size();
+                 
+                 // "Almost nothing" (10px) to Full Size
+                 let start_size = egui::vec2(10.0, 10.0);
+                 
+                 let current_size = start_size + (target_size - start_size) * t;
+                 let current_pos = center - current_size / 2.0;
+
+                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(current_size));
+                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(current_pos));
+                 
+                 ctx.request_repaint();
+             }
+        }
+        
         // 1. Detect OS Maximize attempt (e.g. Win+Up) and switch to custom maximize
         if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
@@ -95,10 +175,10 @@ impl eframe::App for App {
         }
 
         // 2. Track window size when not maximized (for restore)
-        if !self.is_maximized {
-            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+        if !self.is_maximized && self.animation_finished {
+             if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
                 self.last_window_rect = Some(rect);
-            }
+             }
         }
 
         // Helper for toggling maximize state
@@ -264,6 +344,15 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
+                // Optimize: Don't render complex UI during the heavy window resize animation
+                // This prevents the "extreme lag" caused by re-layouting every frame.
+                if !self.animation_finished {
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner(); // Optional: Show a small spinner or nothing
+                    });
+                    return;
+                }
+
                 // Add a separator and space for visual clarity
                 ui.add(egui::Separator::default().spacing(10.0));
 

@@ -307,7 +307,7 @@ pub unsafe fn hooked_nt_query_information_process(
                     parameters: json!({
                         "process_handle": process_handle as usize,
                         "class": "ProcessDebugPort",
-                        "note": "Anti-debugging check detected. Modifying return value.",
+                        "note": "Anti-debugging check detected.",
                     }),
                     stack_trace: Some(capture_stack_trace(CONFIG.stack_trace_frame_limit)),
                 },
