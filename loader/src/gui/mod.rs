@@ -5,7 +5,7 @@ use crate::app::state::{ActiveTab, AppState};
 mod hooking_controls;
 mod launcher;
 mod live_logs;
-mod memory_analysis;
+pub mod memory_analysis;
 mod network_activity;
 
 pub fn render_tab(ctx: &egui::Context, ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {

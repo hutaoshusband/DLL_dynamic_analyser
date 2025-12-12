@@ -13,6 +13,7 @@ use shared::{
     MonitorConfig, Preset,
 };
 use eframe::egui::{Pos2, Color32};
+use crate::gui::memory_analysis::MemoryViewMode;
 pub const DLL_NAME: &str = "client.dll";
 
 #[derive(Clone, Debug)]
@@ -76,6 +77,7 @@ pub struct AppState {
     pub active_ripples: Vec<RippleAnimation>,
     pub previous_tab: Option<ActiveTab>,
     pub tab_transition_start: Option<f64>,
+    pub memory_view_mode: MemoryViewMode,
 }
 
 impl AppState {
@@ -123,6 +125,7 @@ impl AppState {
             active_ripples: Vec::new(),
             previous_tab: None,
             tab_transition_start: None,
+            memory_view_mode: MemoryViewMode::default(),
         }
     }
 
