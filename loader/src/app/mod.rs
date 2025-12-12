@@ -34,6 +34,7 @@ pub struct App {
     startup_time: Option<f64>,
     animation_finished: bool,
     frame_count: usize,
+    startup_target_rect: Option<egui::Rect>,
 }
 
 impl App {
@@ -47,6 +48,7 @@ impl App {
             startup_time: None,
             animation_finished: false,
             frame_count: 0,
+            startup_target_rect: None,
         }
     }
 }
@@ -84,19 +86,29 @@ impl eframe::App for App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         // --- Startup Animation ---
         
-        let mut target_max_rect = ctx.input(|i| i.screen_rect());
-        // Fallback if screen_rect is tiny (uninitialized backend sometimes returns 0x0 or 1x1)
-        if target_max_rect.width() < 800.0 || target_max_rect.height() < 600.0 {
-             // Try to use the viewport rect if it's larger, or default to a standard FHD layout assumption
-             if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
-                 if rect.width() > 800.0 {
-                     target_max_rect = rect;
-                 } else {
-                     // Last resort fallback
-                     target_max_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
-                 }
+        // 1. Determine Target Resolution (Once and Cache)
+        if self.startup_target_rect.is_none() {
+             let mut candidate = ctx.input(|i| i.screen_rect());
+             // Sanity check: If screen_rect is suspiciously small (uninitialized or failed), ignore it.
+             if candidate.width() < 800.0 || candidate.height() < 600.0 {
+                  // Check if viewport is already large (e.g. started maximized externally)
+                  if let Some(vp_rect) = ctx.input(|i| i.viewport().outer_rect) {
+                      if vp_rect.width() > 800.0 {
+                           candidate = vp_rect;
+                      } else {
+                           // Default to 1920x1080 if we have no clue
+                           candidate = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                      }
+                  } else {
+                       candidate = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                  }
              }
+             // Store the determined target.
+             self.startup_target_rect = Some(candidate);
         }
+        
+        // Use the cached target for stability
+        let target_max_rect = self.startup_target_rect.unwrap();
 
         // 0. Warmup phase: Wait for a few frames to let the OS/Window Monitor info stabilize
         self.frame_count += 1;
