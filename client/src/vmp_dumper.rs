@@ -51,11 +51,32 @@ pub enum DumpReason {
     Manual,
 }
 
+/// Represents the type of protector detected on a module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectorType {
+    VMProtect,
+    Enigma,
+    Themida,
+    Unknown,
+}
+
+impl std::fmt::Display for ProtectorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProtectorType::VMProtect => write!(f, "VMProtect"),
+            ProtectorType::Enigma => write!(f, "Enigma"),
+            ProtectorType::Themida => write!(f, "Themida"),
+            ProtectorType::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VmpTarget {
     pub base_address: usize,
     pub size: usize,
     pub module_name: String,
+    pub protector_type: ProtectorType,
     pub dump_priority: u8,
     pub has_been_dumped: bool,
 }
@@ -237,12 +258,12 @@ fn scan_for_vmp_modules() {
             continue; // Already tracking this module
         }
 
-        if is_vmp_protected(base_addr) {
+        if let Some(protector_type) = detect_protector(base_addr) {
             log_event(
                 LogLevel::Warn,
                 LogEvent::VmpTrace {
-                    message: format!("Detected VMP-protected module: {}", path),
-                    details: json!({ "base_address": base_addr }),
+                    message: format!("Detected {}-protected module: {}", protector_type, path),
+                    details: json!({ "base_address": base_addr, "protector": protector_type.to_string() }),
                 },
             );
 
@@ -250,6 +271,7 @@ fn scan_for_vmp_modules() {
                 base_address: base_addr,
                 size: memory.len(),
                 module_name: path.clone(),
+                protector_type,
                 dump_priority: 100,
                 has_been_dumped: false,
             };
@@ -279,22 +301,23 @@ unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, ()> {
     }
 }
 
-/// Checks if a module is protected by VMProtect by scanning its PE section headers.
-fn is_vmp_protected(base_address: usize) -> bool {
+/// Detects protector type by scanning PE section headers.
+/// Returns Some(ProtectorType) if a known protector is detected.
+fn detect_protector(base_address: usize) -> Option<ProtectorType> {
     unsafe {
         let Ok(dos_header) = read_memory::<IMAGE_DOS_HEADER>(base_address) else {
-            return false;
+            return None;
         };
         if dos_header.e_magic != 0x5A4D {
-            return false;
+            return None;
         }
 
         let nt_headers_addr = base_address + dos_header.e_lfanew as usize;
         let Ok(nt_headers) = read_memory::<IMAGE_NT_HEADERS64>(nt_headers_addr) else {
-            return false;
+            return None;
         };
         if nt_headers.Signature != 0x00004550 {
-            return false;
+            return None;
         }
 
         let section_header_addr =
@@ -311,19 +334,46 @@ fn is_vmp_protected(base_address: usize) -> bool {
             };
 
             let section_name = String::from_utf8_lossy(&section_header.Name);
-            if section_name.trim_matches('\0').starts_with(".vmp") {
+            let section_name_clean = section_name.trim_matches('\0').to_lowercase();
+
+            // VMProtect: .vmp0, .vmp1, .vmp2, etc.
+            if section_name_clean.starts_with(".vmp") {
                 log_event(
                     LogLevel::Debug,
                     LogEvent::VmpTrace {
-                        message: format!("Found VMP section: {}", section_name.trim_matches('\0')),
+                        message: format!("Found VMProtect section: {}", section_name.trim_matches('\0')),
                         details: json!({ "module_base": base_address }),
                     },
                 );
-                return true;
+                return Some(ProtectorType::VMProtect);
+            }
+
+            // Enigma: .enigma1, .enigma2
+            if section_name_clean.starts_with(".enigma") {
+                log_event(
+                    LogLevel::Debug,
+                    LogEvent::VmpTrace {
+                        message: format!("Found Enigma section: {}", section_name.trim_matches('\0')),
+                        details: json!({ "module_base": base_address }),
+                    },
+                );
+                return Some(ProtectorType::Enigma);
+            }
+
+            // Themida/Winlicense: .themida, .winlice
+            if section_name_clean.starts_with(".themida") || section_name_clean.starts_with(".winlice") {
+                log_event(
+                    LogLevel::Debug,
+                    LogEvent::VmpTrace {
+                        message: format!("Found Themida/Winlicense section: {}", section_name.trim_matches('\0')),
+                        details: json!({ "module_base": base_address }),
+                    },
+                );
+                return Some(ProtectorType::Themida);
             }
         }
     }
-    false
+    None
 }
 
 fn analyze_and_dump_if_ready() {
@@ -477,13 +527,14 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
             DumpReason::UnpackedPe => "unpacked",
             DumpReason::VmpSection => "vmp_section",
         };
+        let protector_str = target.protector_type.to_string().to_lowercase();
         let module_file_name = PathBuf::from(&target.module_name)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown_module")
             .to_string();
 
-        let filename = format!("{}_{}_{:#X}.dmp", module_file_name, reason_str, base_address);
+        let filename = format!("{}_{}_{}_{:#X}.dmp", module_file_name, protector_str, reason_str, base_address);
         let full_path = dump_path.join(filename);
 
         match File::create(&full_path) {

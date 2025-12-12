@@ -108,5 +108,14 @@ fn format_log_event(event: &LogEvent) -> String {
         LogEvent::UnpackerActivity { source_address, finding, details } => {
             format!("Unpacker activity at {:#x}: {} | Details: {}", source_address, finding, details)
         }
+        LogEvent::FullEntropyResult { module_name, entropy } => {
+            let avg = if !entropy.is_empty() {
+                entropy.iter().sum::<f32>() / entropy.len() as f32
+            } else { 0.0 };
+            format!("Full entropy for '{}': avg {:.2} ({} chunks)", module_name, avg, entropy.len())
+        }
+        LogEvent::YaraMatch { rule_name, address, region_size, .. } => {
+            format!("🔍 YARA Match: {} @ {:#x} (size: {:#x})", rule_name, address, region_size)
+        }
     }
 }

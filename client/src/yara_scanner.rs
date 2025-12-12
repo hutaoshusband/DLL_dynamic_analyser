@@ -124,24 +124,15 @@ impl YaraScanner {
                                         (key.to_string(), json!(val_str))
                                     }).collect();
 
+                                    // Use the dedicated YaraMatch event for better UI display
                                     log_event(
-                                        LogLevel::Warn, // YARA hit is usually significant
-                                        LogEvent::MemoryScan {
-                                            status: "YARA Match".to_string(),
-                                            result: format!(
-                                                "Rule: {} @ Address: {:#x} (Region Size: {:#x})", 
-                                                rule_name, address, size
-                                            ),
+                                        LogLevel::Warn,
+                                        LogEvent::YaraMatch {
+                                            rule_name: rule_name.to_string(),
+                                            address,
+                                            region_size: size,
+                                            metadata: meta.to_string(),
                                         },
-                                    );
-                                    
-                                    // Log detailed structured info too if needed
-                                    log_event(
-                                        LogLevel::Info,
-                                        LogEvent::StaticAnalysis {
-                                           finding: format!("YARA Match: {}", rule_name),
-                                           details: meta.to_string(),
-                                        }
                                     );
                                 }
                             },
@@ -156,9 +147,7 @@ impl YaraScanner {
                                 );
                             }
                         }
-                     } else {
-                         // Failed to acquire reentrancy guard, skipping scan for this region to avoid recursion loop
-                     }
+                    }
                 }
             }
 
