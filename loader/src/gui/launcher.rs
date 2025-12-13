@@ -25,7 +25,7 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
         F: FnOnce(&mut Ui),
     {
         let frame = egui::Frame {
-            fill: ui.visuals().panel_fill,
+            fill: egui::Color32::TRANSPARENT,
             stroke: egui::Stroke::new(1.2, ui.visuals().widgets.noninteractive.bg_stroke.color),
             inner_margin: egui::Margin::same(14.0),
             rounding: ui.visuals().widgets.noninteractive.rounding,
