@@ -19,3 +19,4 @@ egui_plot = "0.27.2"
 shared = { path = "../shared" }
 pelite = "0.10.0"
 raw-window-handle = "0.6"
+open = "3"
