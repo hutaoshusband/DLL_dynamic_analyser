@@ -63,11 +63,8 @@ It bridges the gap between static analysis and runtime debugging, wrapped in a v
 Clone the repository and build the workspace:
 
 ```bash
-# Clone the repository
 git clone https://github.com/hutaoshusband/DLL_dynamic_analyser
 cd DLL_dynamic_analyzer
-
-# Build the entire workspace (Loader + Client + Shared)
 cargo build --release --workspace
 ```
 
