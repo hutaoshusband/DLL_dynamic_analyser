@@ -35,6 +35,7 @@ pub enum Command {
     UpdateConfig(MonitorConfig),
     DumpModule { module_name: String },
     LoadYaraRules(String),
+    ScanYara,
 }
 
 macro_rules! define_monitor_config {

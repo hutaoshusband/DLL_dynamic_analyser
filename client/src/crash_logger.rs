@@ -4,25 +4,30 @@
 #![allow(dead_code)]
 
 use std::ffi::c_void;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use chrono::Local;
 use once_cell::sync::OnceCell;
 use widestring::U16CString;
-use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+use crate::config::CONFIG;
+use crate::ReentrancyGuard;
+use iced_x86::{Decoder, Formatter, FormatterOutput, FormatterTextKind, NasmFormatter};
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, MAX_PATH};
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    CONTEXT, EXCEPTION_POINTERS, EXCEPTION_RECORD,
+    EXCEPTION_POINTERS, ReadProcessMemory, RtlCaptureStackBackTrace,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
     TH32CS_SNAPMODULE32,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
-use crate::ReentrancyGuard;
 
 
 static LOG_DIR: OnceCell<PathBuf> = OnceCell::new();
@@ -133,6 +138,9 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
     let tid = GetCurrentThreadId();
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     
+    let mut exception_code = 0u32;
+    let mut exception_address_ptr: *mut c_void = std::ptr::null_mut();
+    
     let mut crash_info = String::new();
     crash_info.push_str("\n============================================================\n");
     crash_info.push_str("         CRASH DETECTED - DLL ANALYZER\n");
@@ -147,11 +155,11 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
         
         if !exception_record.is_null() {
             let record = &*exception_record;
-            let exception_code = record.ExceptionCode as u32;
+            exception_code = record.ExceptionCode as u32;
             let exception_address = record.ExceptionAddress;
-            let exception_flags = record.ExceptionFlags;
-            
+            exception_address_ptr = exception_address;
             let exception_name = get_exception_name(exception_code);
+            let exception_flags = record.ExceptionFlags;
             
             crash_info.push_str("--- EXCEPTION INFO ---\n");
             crash_info.push_str(&format!("Code: 0x{:08X} ({})\n", exception_code, exception_name));
@@ -219,22 +227,61 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
         }
     }
     crash_info.push_str("\n");
-    
+
+    let stack_addresses = capture_stack_addresses(CONFIG.stack_trace_frame_limit);
+    let stack_lines: Vec<String> = stack_addresses
+        .iter()
+        .enumerate()
+        .map(|(idx, addr)| {
+            let module_desc = if let Some((name, base, offset)) = get_module_for_address(*addr) {
+                format!("{} + {:#x}", name, offset)
+            } else {
+                "UNKNOWN".to_string()
+            };
+            format!("{:02}: {:#018x} ({})", idx, addr, module_desc)
+        })
+        .collect();
+
+    crash_info.push_str("--- STACK TRACE ---\n");
+    if stack_lines.is_empty() {
+        crash_info.push_str("Unable to capture stack trace.\n\n");
+    } else {
+        for line in &stack_lines {
+            crash_info.push_str(line);
+            crash_info.push('\n');
+        }
+        crash_info.push('\n');
+    }
+
+    let disasm_lines = if exception_address_ptr.is_null() {
+        Vec::new()
+    } else {
+        disassemble_near(exception_address_ptr as usize, 64, 192)
+    };
+
+    crash_info.push_str("--- ASSEMBLY NEAR CRASH ---\n");
+    if disasm_lines.is_empty() {
+        crash_info.push_str("Disassembly unavailable.\n");
+    } else {
+        for line in &disasm_lines {
+            crash_info.push_str(line);
+            crash_info.push('\n');
+        }
+    }
+    crash_info.push_str("\n");
     crash_info.push_str("============================================================\n");
     
     log_to_file("crash", &crash_info);
     
-    let exception_name = if !exception_info.is_null() && !(*exception_info).ExceptionRecord.is_null() {
-        let code = (*(*exception_info).ExceptionRecord).ExceptionCode as u32;
-        get_exception_name(code)
+    let exception_name = if exception_code != 0 {
+        get_exception_name(exception_code)
     } else {
         "UNKNOWN"
     };
-    
-    let exception_addr = if !exception_info.is_null() && !(*exception_info).ExceptionRecord.is_null() {
-        format!("{:?}", (*(*exception_info).ExceptionRecord).ExceptionAddress)
-    } else {
+    let exception_addr_display = if exception_address_ptr.is_null() {
         "UNKNOWN".to_string()
+    } else {
+        format!("{:#018x}", exception_address_ptr as usize)
     };
     
     let last_steps: String = INIT_STEPS.lock()
@@ -247,15 +294,39 @@ pub unsafe fn log_crash(exception_info: *mut EXCEPTION_POINTERS) {
         })
         .unwrap_or_else(|_| "Unable to get steps".to_string());
     
+    let process_path = get_process_path();
+    let process_name = Path::new(&process_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown_process");
+    let stack_section = if stack_lines.is_empty() {
+        "Stack trace unavailable".to_string()
+    } else {
+        stack_lines.join("\n")
+    };
+    let disasm_section = if disasm_lines.is_empty() {
+        "Disassembly unavailable".to_string()
+    } else {
+        disasm_lines.join("\n")
+    };
+
     let msgbox_content = format!(
-        "Exception: {} at {}\n\n\
+        "DLL CRASHED INSIDE OF ({})\n\n\
+        Exception: {} at {}\n\n\
+        Stack Trace:\n{}\n\n\
+        Assembly Around Crash Address:\n{}\n\n\
         Last Steps:\n{}\n\n\
         Full details saved to logs/ folder.",
-        exception_name, exception_addr, last_steps
+        process_name,
+        exception_name,
+        exception_addr_display,
+        stack_section,
+        disasm_section,
+        last_steps
     );
-    
+
     show_crash_message_box("DLL ANALYZER CRASH", &msgbox_content);
-    
+
     IN_CRASH_HANDLER.store(false, Ordering::SeqCst);
 }
 
@@ -279,7 +350,6 @@ fn get_exception_name(code: u32) -> &'static str {
         0x80000003 => "BREAKPOINT",
         0x80000004 => "SINGLE_STEP",
         0xC0000026 => "INVALID_DISPOSITION",
-        0xC000008E => "FLT_DIVIDE_BY_ZERO",
         0xC0000194 => "POSSIBLE_DEADLOCK",
         0xE06D7363 => "CPP_EXCEPTION (Microsoft C++ Exception)",
         _ => "UNKNOWN_EXCEPTION",
@@ -365,6 +435,111 @@ fn show_crash_message_box(title: &str, message: &str) {
             MB_OK | MB_ICONERROR,
         );
     }
+}
+
+struct DisasmOutput(String);
+
+impl DisasmOutput {
+    fn new() -> Self {
+        Self(String::new())
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    fn take(&mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl FormatterOutput for DisasmOutput {
+    fn write(&mut self, text: &str, _kind: FormatterTextKind) {
+        self.0.push_str(text);
+    }
+}
+
+fn get_process_path() -> String {
+    let mut buffer = [0u16; MAX_PATH as usize];
+    let len = unsafe { GetModuleFileNameW(0, buffer.as_mut_ptr(), buffer.len() as u32) };
+    if len == 0 {
+        return "unknown".to_string();
+    }
+    String::from_utf16_lossy(&buffer[..len as usize])
+}
+
+fn capture_stack_addresses(max_frames: usize) -> Vec<usize> {
+    if max_frames == 0 {
+        return Vec::new();
+    }
+    let mut frames: Vec<*mut c_void> = vec![std::ptr::null_mut(); max_frames];
+    let captured = unsafe {
+        RtlCaptureStackBackTrace(
+            1,
+            max_frames as u32,
+            frames.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    } as usize;
+    frames.into_iter().take(captured).map(|addr| addr as usize).collect()
+}
+
+fn read_memory(address: usize, length: usize) -> Option<Vec<u8>> {
+    if length == 0 {
+        return None;
+    }
+    let process = unsafe { GetCurrentProcess() };
+    let mut buffer = vec![0u8; length];
+    let mut bytes_read = 0;
+    let success = unsafe {
+        ReadProcessMemory(
+            process,
+            address as *const c_void,
+            buffer.as_mut_ptr() as *mut c_void,
+            length,
+            &mut bytes_read,
+        )
+    };
+    if success != 0 && bytes_read > 0 {
+        buffer.truncate(bytes_read as usize);
+        Some(buffer)
+    } else {
+        None
+    }
+}
+
+fn disassemble_near(address: usize, before: usize, after: usize) -> Vec<String> {
+    if after == 0 && before == 0 {
+        return Vec::new();
+    }
+    let start = address.saturating_sub(before);
+    let total = before.saturating_add(after);
+    if total == 0 {
+        return Vec::new();
+    }
+    let bytes = match read_memory(start, total) {
+        Some(data) => data,
+        None => return Vec::new(),
+    };
+    let mut decoder = Decoder::new(64, &bytes, 0);
+    decoder.set_ip(start as u64);
+    let mut formatter = NasmFormatter::new();
+    let mut output = DisasmOutput::new();
+    let mut instructions = Vec::new();
+    let end_ip = address.saturating_add(after) as u64;
+    
+    while decoder.can_decode() && instructions.len() < 64 {
+        let instruction = decoder.decode();
+        output.clear();
+        formatter.format(&instruction, &mut output);
+        let disasm_text = output.take();
+        let marker = if instruction.ip() == address as u64 { "->" } else { "  " };
+        instructions.push(format!("{} {:#018x}: {}", marker, instruction.ip(), disasm_text));
+        if instruction.ip() >= end_ip {
+            break;
+        }
+    }
+    instructions
 }
 
 

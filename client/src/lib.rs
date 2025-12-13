@@ -381,6 +381,21 @@ fn command_listener_thread(pipe_handle: isize, mut message_buffer: String) {
                             message: "YARA feature not enabled in build.".to_string() 
                         });
                     }
+                    Ok(Command::ScanYara) => {
+                        #[cfg(feature = "use_yara")]
+                        {
+                            debug_log("Starting manual YARA scan...");
+                            thread::spawn(|| {
+                                let scanner = crate::yara_scanner::SCANNER.lock().unwrap();
+                                scanner.scan_memory();
+                            });
+                        }
+                        #[cfg(not(feature = "use_yara"))]
+                        log_event(LogLevel::Error, LogEvent::Error { 
+                            source: "YaraScanner".to_string(), 
+                            message: "YARA feature not enabled in build.".to_string() 
+                        });
+                    }
                     Err(e) => debug_log(&format!("Failed to parse command: '{}', error: {}", command_str, e)),
                 }
             }

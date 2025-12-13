@@ -464,6 +464,23 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
 
                 MemoryViewMode::YaraMatches => {
                     ui.horizontal(|ui| {
+                        if ui.button("🔍 Scan Now").clicked() {
+                            if let Some(pipe_handle) = *state.commands_pipe_handle.lock().unwrap() {
+                                let command = Command::ScanYara;
+                                if let Ok(command_json) = serde_json::to_string(&command) {
+                                    let command_to_send = format!("{}\n", command_json);
+                                    unsafe {
+                                        windows_sys::Win32::Storage::FileSystem::WriteFile(
+                                            pipe_handle,
+                                            command_to_send.as_ptr(),
+                                            command_to_send.len() as u32,
+                                            &mut 0,
+                                            std::ptr::null_mut(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         if ui.button("🗑 Clear Matches").clicked() {
                             state.yara_matches.lock().unwrap().clear();
                         }
@@ -481,26 +498,27 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                             ui.add_space(60.0);
                             ui.label(RichText::new("🔍").size(48.0).color(Color32::from_rgb(60, 64, 82)));
                             ui.add_space(12.0);
-                            ui.label(RichText::new("No YARA matches yet. Wait for automatic scans or load YARA rules.").size(14.0).color(Color32::from_rgb(127, 132, 156)));
+                            ui.label(RichText::new("No YARA matches yet. Wait for automatic scans, click 'Scan Now', or load YARA rules.").size(14.0).color(Color32::from_rgb(127, 132, 156)));
                         });
                     } else {
                         let matches_clone: Vec<_> = yara_matches.iter().cloned().collect();
                         drop(yara_matches);
                         
                         egui::Grid::new("yara_header")
-                            .num_columns(3)
+                            .num_columns(4)
                             .spacing([40.0, 4.0])
                             .show(ui, |ui| {
                                 ui.label(RichText::new("Rule Name").strong());
                                 ui.label(RichText::new("Address").strong());
                                 ui.label(RichText::new("Region Size").strong());
+                                ui.label(RichText::new("Metadata").strong());
                                 ui.end_row();
                             });
                         
                         ui.separator();
                         
                         egui::Grid::new("yara_matches_grid")
-                            .num_columns(3)
+                            .num_columns(4)
                             .spacing([40.0, 6.0])
                             .striped(true)
                             .show(ui, |ui| {
@@ -518,6 +536,26 @@ pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut
                                     ui.label(RichText::new(&m.rule_name).color(rule_color));
                                     ui.label(RichText::new(format!("{:#x}", m.address)).color(Color32::from_rgb(137, 180, 250)));
                                     ui.label(RichText::new(format!("{:#x}", m.region_size)).color(Color32::from_rgb(127, 132, 156)));
+                                    
+                                    // Parse and format metadata if it looks like JSON
+                                    let metadata_display = if m.metadata.starts_with('{') {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&m.metadata) {
+                                            if let Some(obj) = json.as_object() {
+                                                obj.iter()
+                                                   .map(|(k, v)| format!("{}: {}", k, v))
+                                                   .collect::<Vec<_>>()
+                                                   .join(", ")
+                                            } else {
+                                                m.metadata.clone()
+                                            }
+                                        } else {
+                                            m.metadata.clone()
+                                        }
+                                    } else {
+                                        m.metadata.clone()
+                                    };
+
+                                    ui.label(RichText::new(metadata_display).color(Color32::from_rgb(166, 227, 161)));
                                     ui.end_row();
                                 }
                             });
