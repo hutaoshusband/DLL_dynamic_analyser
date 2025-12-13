@@ -73,6 +73,18 @@ cargo build --release --workspace
 
 > **Note:** The output binaries will be located in `target/release/`. You will need both `loader.exe` and `client.dll`.
 
+### Windows quick build script
+
+If you're on Windows, a helper script `build.bat` is included at the repository root. It sets aggressive `RUSTFLAGS` (LTO, single codegen unit, panic=abort, size-optimized) and runs a verbose release build while keeping the console open.
+
+To use it from PowerShell or cmd.exe, run:
+
+```powershell
+.\build.bat
+```
+
+The script also attempts to strip non-MSVC binaries if a `strip` tool is available.
+
 ## 🎮 Usage
 
 1.  **Launch the Loader:**
