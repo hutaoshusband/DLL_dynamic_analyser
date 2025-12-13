@@ -12,7 +12,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use self::state::{ActiveTab, AppState, RippleAnimation};
 
-
 fn get_tab_index(tab: ActiveTab) -> usize {
     match tab {
         ActiveTab::Launcher => 0,
@@ -28,7 +27,7 @@ pub struct App {
     log_receiver: mpsc::Receiver<String>,
     is_maximized: bool,
     last_window_rect: Option<egui::Rect>,
-    
+
     startup_time: Option<f64>,
     animation_finished: bool,
     frame_count: usize,
@@ -76,101 +75,107 @@ impl eframe::App for App {
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-        
+
         if self.startup_target_rect.is_none() {
-             let mut screen_rect = ctx.input(|i| i.screen_rect());
-             
-             if screen_rect.width() < 800.0 || screen_rect.height() < 600.0 {
-                  if let Some(vp_rect) = ctx.input(|i| i.viewport().outer_rect) {
-                      if vp_rect.width() > 800.0 {
-                           screen_rect = vp_rect;
-                      } else {
-                           screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
-                      }
-                  } else {
-                       screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
-                  }
-             }
+            let mut screen_rect = ctx.input(|i| i.screen_rect());
 
-             let target_w = 1200.0f32.min(screen_rect.width() * 0.9);
-             let target_h = 800.0f32.min(screen_rect.height() * 0.9);
-             let target_size = egui::vec2(target_w, target_h);
-             
-             let center = screen_rect.center();
-             let target_pos = center - target_size / 2.0;
-             
-             let candidate = egui::Rect::from_min_size(target_pos, target_size);
+            if screen_rect.width() < 800.0 || screen_rect.height() < 600.0 {
+                if let Some(vp_rect) = ctx.input(|i| i.viewport().outer_rect) {
+                    if vp_rect.width() > 800.0 {
+                        screen_rect = vp_rect;
+                    } else {
+                        screen_rect =
+                            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                    }
+                } else {
+                    screen_rect =
+                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1080.0));
+                }
+            }
 
-             self.startup_target_rect = Some(candidate);
+            let target_w = 1200.0f32.min(screen_rect.width() * 0.9);
+            let target_h = 800.0f32.min(screen_rect.height() * 0.9);
+            let target_size = egui::vec2(target_w, target_h);
+
+            let center = screen_rect.center();
+            let target_pos = center - target_size / 2.0;
+
+            let candidate = egui::Rect::from_min_size(target_pos, target_size);
+
+            self.startup_target_rect = Some(candidate);
         }
-        
+
         let target_final_rect = self.startup_target_rect.unwrap();
 
         self.frame_count += 1;
-        if self.frame_count < 10 { // Increased warmup to 10 frames to be safe
-             let start_w = 10.0; // Start REALLY small as requested ("fast nichts")
-             let start_h = 10.0;
-             let center = target_final_rect.center(); 
-             let start_pos = center - egui::vec2(start_w, start_h) / 2.0;
+        if self.frame_count < 10 {
+            // Increased warmup to 10 frames to be safe
+            let start_w = 10.0; // Start REALLY small as requested ("fast nichts")
+            let start_h = 10.0;
+            let center = target_final_rect.center();
+            let start_pos = center - egui::vec2(start_w, start_h) / 2.0;
 
-             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([start_w, start_h].into()));
-             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(start_pos));
-             
-             ctx.request_repaint();
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([start_w, start_h].into()));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(start_pos));
+
+            ctx.request_repaint();
         } else if !self.animation_finished {
-             let now = ctx.input(|i| i.time);
-             
-             if self.startup_time.is_none() {
-                 self.startup_time = Some(now);
-             }
-             
-             let start = self.startup_time.unwrap();
-             let duration = 0.6; // 600ms
-             let t_raw = ((now - start) / duration).clamp(0.0, 1.0) as f32;
-             
-             let t = 1.0 - (1.0 - t_raw).powi(3);
+            let now = ctx.input(|i| i.time);
 
-             if t_raw >= 1.0 {
-                 self.animation_finished = true;
-                 
-                 self.is_maximized = false; 
-                 
-                 ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
-                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_final_rect.min));
-                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_final_rect.size()));
-             } else {
-                 let center = target_final_rect.center();
-                 let target_size = target_final_rect.size();
-                 
-                 let start_size = egui::vec2(10.0, 10.0);
-                 
-                 let current_size = start_size + (target_size - start_size) * t;
-                 let current_pos = center - current_size / 2.0;
+            if self.startup_time.is_none() {
+                self.startup_time = Some(now);
+            }
 
-                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(current_size));
-                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(current_pos));
-                 
-                 ctx.request_repaint();
-             }
+            let start = self.startup_time.unwrap();
+            let duration = 0.6; // 600ms
+            let t_raw = ((now - start) / duration).clamp(0.0, 1.0) as f32;
+
+            let t = 1.0 - (1.0 - t_raw).powi(3);
+
+            if t_raw >= 1.0 {
+                self.animation_finished = true;
+
+                self.is_maximized = false;
+
+                ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(target_final_rect.min));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_final_rect.size()));
+            } else {
+                let center = target_final_rect.center();
+                let target_size = target_final_rect.size();
+
+                let start_size = egui::vec2(10.0, 10.0);
+
+                let current_size = start_size + (target_size - start_size) * t;
+                let current_pos = center - current_size / 2.0;
+
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(current_size));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(current_pos));
+
+                ctx.request_repaint();
+            }
         }
-        
+
         if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             self.is_maximized = true;
-            
+
             ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
 
             let monitor_rect = ctx.input(|i| i.screen_rect());
-            let safe_rect = egui::Rect::from_min_size(monitor_rect.min, monitor_rect.size() - egui::vec2(0.0, 1.0));
+            let safe_rect = egui::Rect::from_min_size(
+                monitor_rect.min,
+                monitor_rect.size() - egui::vec2(0.0, 1.0),
+            );
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(safe_rect.min));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(safe_rect.size()));
         }
 
         if !self.is_maximized && self.animation_finished {
-             if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+            if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
                 self.last_window_rect = Some(rect);
-             }
+            }
         }
 
         let toggle_maximize = |is_maximized: &mut bool, last_rect: Option<egui::Rect>| {
@@ -181,13 +186,16 @@ impl eframe::App for App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(rect.min));
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(rect.size()));
                 } else {
-                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([1000.0, 700.0].into()));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize([1000.0, 700.0].into()));
                 }
             } else {
                 *is_maximized = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
                 let monitor_rect = ctx.input(|i| i.screen_rect());
-                let safe_rect = egui::Rect::from_min_size(monitor_rect.min, monitor_rect.size() - egui::vec2(0.0, 1.0));
+                let safe_rect = egui::Rect::from_min_size(
+                    monitor_rect.min,
+                    monitor_rect.size() - egui::vec2(0.0, 1.0),
+                );
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(safe_rect.min));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(safe_rect.size()));
             }
@@ -202,7 +210,7 @@ impl eframe::App for App {
 
         if primary_clicked {
             if let Some(pos) = pointer_pos {
-                 state.active_ripples.push(RippleAnimation {
+                state.active_ripples.push(RippleAnimation {
                     start_time: ctx.input(|i| i.time),
                     center: pos,
                     color: egui::Color32::from_rgb(0x33, 0xCC, 0xFF),
@@ -224,80 +232,103 @@ impl eframe::App for App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 if response.double_clicked() {
-                     toggle_maximize(&mut self.is_maximized, self.last_window_rect);
+                    toggle_maximize(&mut self.is_maximized, self.last_window_rect);
                 }
 
-                ui.with_layout(egui::Layout::from_main_dir_and_cross_align(egui::Direction::LeftToRight, egui::Align::Center), |ui| {
-                    let tabs = [
-                        (ActiveTab::Launcher, "🚀 Launcher"),
-                        (ActiveTab::Logs, "📜 Logs"),
-                        (ActiveTab::MemoryAnalysis, "💾 Memory Analysis"),
-                        (ActiveTab::Hooking, "🎣 Hooking"),
-                        (ActiveTab::Network, "🌐 Network"),
-                    ];
+                ui.with_layout(
+                    egui::Layout::from_main_dir_and_cross_align(
+                        egui::Direction::LeftToRight,
+                        egui::Align::Center,
+                    ),
+                    |ui| {
+                        let tabs = [
+                            (ActiveTab::Launcher, "🚀 Launcher"),
+                            (ActiveTab::Logs, "📜 Logs"),
+                            (ActiveTab::MemoryAnalysis, "💾 Memory Analysis"),
+                            (ActiveTab::Hooking, "🎣 Hooking"),
+                            (ActiveTab::Network, "🌐 Network"),
+                        ];
 
-                    let mut tabs_width = 0.0;
-                    let style = ui.style();
-                    let font_id = egui::TextStyle::Button.resolve(style);
-                    let button_padding = style.spacing.button_padding;
-                    let item_spacing = style.spacing.item_spacing.x;
-                    let min_button_size = egui::vec2(100.0, 40.0);
+                        let mut tabs_width = 0.0;
+                        let style = ui.style();
+                        let font_id = egui::TextStyle::Button.resolve(style);
+                        let button_padding = style.spacing.button_padding;
+                        let item_spacing = style.spacing.item_spacing.x;
+                        let min_button_size = egui::vec2(100.0, 40.0);
 
-                    for (_, title) in tabs.iter() {
-                        let text_size = ui.painter().layout_no_wrap(title.to_string(), font_id.clone(), style.visuals.text_color()).size();
-                        let button_width = (text_size.x + button_padding.x * 2.0).max(min_button_size.x);
-                        tabs_width += button_width;
-                    }
-                    tabs_width += (tabs.len() - 1) as f32 * item_spacing;
-
-                    let available_width = ui.available_width();
-                    let close_button_width = 40.0 * 3.0; // Space for 3 buttons
-                    let spacer_width = (available_width - tabs_width - close_button_width).max(0.0) / 2.0;
-
-                    ui.add_space(spacer_width);
-
-                    for (tab, title) in tabs.iter() {
-                        let is_active = state.active_tab == *tab;
-                        let button = egui::Button::new(*title)
-                            .frame(false)
-                            .min_size(min_button_size);
-                        let response = ui.add(button);
-
-                        if is_active {
-                            let rect = response.rect;
-                            ui.painter().line_segment(
-                                [rect.left_bottom() + egui::vec2(0.0, -5.0), rect.right_bottom() + egui::vec2(0.0, -5.0)],
-                                egui::Stroke::new(2.0, egui::Color32::from_rgb(0x33, 0xCC, 0xFF))
-                            );
+                        for (_, title) in tabs.iter() {
+                            let text_size = ui
+                                .painter()
+                                .layout_no_wrap(
+                                    title.to_string(),
+                                    font_id.clone(),
+                                    style.visuals.text_color(),
+                                )
+                                .size();
+                            let button_width =
+                                (text_size.x + button_padding.x * 2.0).max(min_button_size.x);
+                            tabs_width += button_width;
                         }
+                        tabs_width += (tabs.len() - 1) as f32 * item_spacing;
 
+                        let available_width = ui.available_width();
+                        let close_button_width = 40.0 * 3.0; // Space for 3 buttons
+                        let spacer_width =
+                            (available_width - tabs_width - close_button_width).max(0.0) / 2.0;
 
-                        if response.clicked() {
-                            if state.active_tab != *tab {
-                                state.previous_tab = Some(state.active_tab);
-                                state.tab_transition_start = Some(ctx.input(|i| i.time));
-                                state.active_tab = *tab;
+                        ui.add_space(spacer_width);
+
+                        for (tab, title) in tabs.iter() {
+                            let is_active = state.active_tab == *tab;
+                            let button = egui::Button::new(*title)
+                                .frame(false)
+                                .min_size(min_button_size);
+                            let response = ui.add(button);
+
+                            if is_active {
+                                let rect = response.rect;
+                                ui.painter().line_segment(
+                                    [
+                                        rect.left_bottom() + egui::vec2(0.0, -5.0),
+                                        rect.right_bottom() + egui::vec2(0.0, -5.0),
+                                    ],
+                                    egui::Stroke::new(
+                                        2.0,
+                                        egui::Color32::from_rgb(0x33, 0xCC, 0xFF),
+                                    ),
+                                );
+                            }
+
+                            if response.clicked() {
+                                if state.active_tab != *tab {
+                                    state.previous_tab = Some(state.active_tab);
+                                    state.tab_transition_start = Some(ctx.input(|i| i.time));
+                                    state.active_tab = *tab;
+                                }
                             }
                         }
-                    }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let button_size = [24.0, 24.0];
-                        
-                        if ui.add_sized(button_size, egui::Button::new("❌")).clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let button_size = [24.0, 24.0];
 
-                        let max_icon = if self.is_maximized { "❐" } else { "🗖" };
-                        if ui.add_sized(button_size, egui::Button::new(max_icon)).clicked() {
-                             toggle_maximize(&mut self.is_maximized, self.last_window_rect);
-                        }
+                            if ui.add_sized(button_size, egui::Button::new("❌")).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
 
-                        if ui.add_sized(button_size, egui::Button::new("🗕")).clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                        }
-                    });
-                });
+                            let max_icon = if self.is_maximized { "❐" } else { "🗖" };
+                            if ui
+                                .add_sized(button_size, egui::Button::new(max_icon))
+                                .clicked()
+                            {
+                                toggle_maximize(&mut self.is_maximized, self.last_window_rect);
+                            }
+
+                            if ui.add_sized(button_size, egui::Button::new("🗕")).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                            }
+                        });
+                    },
+                );
             });
 
         egui::CentralPanel::default()
@@ -313,7 +344,9 @@ impl eframe::App for App {
                 ui.add(egui::Separator::default().spacing(10.0));
 
                 let mut transition_active = false;
-                if let (Some(prev_tab), Some(start_time)) = (state.previous_tab, state.tab_transition_start) {
+                if let (Some(prev_tab), Some(start_time)) =
+                    (state.previous_tab, state.tab_transition_start)
+                {
                     let now = ctx.input(|i| i.time);
                     let duration = 0.3; // 300ms transition
                     let t = (now - start_time) / duration;
@@ -322,11 +355,11 @@ impl eframe::App for App {
                         transition_active = true;
                         let t = t as f32;
                         let t_ease = 1.0 - (1.0 - t).powi(3);
-                        
+
                         let prev_idx = get_tab_index(prev_tab);
                         let curr_idx = get_tab_index(state.active_tab);
                         let dir = if curr_idx > prev_idx { 1.0 } else { -1.0 };
-                        
+
                         let rect = ui.available_rect_before_wrap();
                         let width = rect.width();
 
@@ -336,10 +369,10 @@ impl eframe::App for App {
                             let offset_x = -dir * width * t_ease;
                             let mut prev_rect = rect;
                             prev_rect = prev_rect.translate(egui::vec2(offset_x, 0.0));
-                            
+
                             ui.allocate_ui_at_rect(prev_rect, |ui| {
                                 ui.push_id("prev_tab_view", |ui| {
-                                     crate::gui::render_tab(ctx, ui, &mut state, prev_tab);
+                                    crate::gui::render_tab(ctx, ui, &mut state, prev_tab);
                                 });
                             });
                         }
@@ -351,12 +384,12 @@ impl eframe::App for App {
 
                             ui.allocate_ui_at_rect(curr_rect, |ui| {
                                 ui.push_id("curr_tab_view", |ui| {
-                                     let current_tab = state.active_tab;
-                                     crate::gui::render_tab(ctx, ui, &mut state, current_tab);
+                                    let current_tab = state.active_tab;
+                                    crate::gui::render_tab(ctx, ui, &mut state, current_tab);
                                 });
                             });
                         }
-                        
+
                         ctx.request_repaint();
                     } else {
                         state.previous_tab = None;
@@ -369,7 +402,6 @@ impl eframe::App for App {
                     crate::gui::render_tab(ctx, ui, &mut state, current_tab);
                 }
             });
-
 
         if state.is_process_running.load(Ordering::SeqCst) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -386,8 +418,12 @@ impl eframe::App for App {
                 let t = elapsed as f32 / duration as f32;
                 let radius = t * 150.0; // Max radius 150
                 let opacity = (1.0 - t).powi(2); // Quadratic ease-out or just squared falloff for faster fade
-                
-                 ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("global_ripples"))).circle_filled(
+
+                ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("global_ripples"),
+                ))
+                .circle_filled(
                     ripple.center,
                     radius,
                     ripple.color.linear_multiply(opacity),

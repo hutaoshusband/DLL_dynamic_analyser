@@ -26,9 +26,9 @@ pub fn render_log_tab(ui: &mut Ui, state: &mut AppState) {
                             LogLevel::Fatal | LogLevel::Error => Color32::from_rgb(243, 139, 168), // Red
                             LogLevel::Success => Color32::from_rgb(166, 227, 161), // Green
                             LogLevel::Warn => Color32::from_rgb(250, 179, 135),    // Orange
-                            LogLevel::Info => Color32::from_rgb(137, 180, 250),     // Blue
-                            LogLevel::Debug => Color32::from_rgb(198, 160, 246),    // Mauve
-                            LogLevel::Trace => Color32::from_rgb(127, 132, 156),    // Faint
+                            LogLevel::Info => Color32::from_rgb(137, 180, 250),    // Blue
+                            LogLevel::Debug => Color32::from_rgb(198, 160, 246),   // Mauve
+                            LogLevel::Trace => Color32::from_rgb(127, 132, 156),   // Faint
                         };
                         let mut log_text = format!(
                             "[{}] {}",
@@ -38,7 +38,7 @@ pub fn render_log_tab(ui: &mut Ui, state: &mut AppState) {
                         if *count > 1 {
                             log_text = format!("({}x) {}", count, log_text);
                         }
-                        
+
                         ui.horizontal(|ui| {
                             if log.origin_suspicious {
                                 ui.colored_label(Color32::from_rgb(255, 0, 0), "💀");
@@ -106,17 +106,42 @@ fn format_log_event(event: &LogEvent) -> String {
         LogEvent::StringDump { address, value, .. } => {
             format!("String at {:#x}: {}", address, value)
         }
-        LogEvent::UnpackerActivity { source_address, finding, details } => {
-            format!("Unpacker activity at {:#x}: {} | Details: {}", source_address, finding, details)
+        LogEvent::UnpackerActivity {
+            source_address,
+            finding,
+            details,
+        } => {
+            format!(
+                "Unpacker activity at {:#x}: {} | Details: {}",
+                source_address, finding, details
+            )
         }
-        LogEvent::FullEntropyResult { module_name, entropy } => {
+        LogEvent::FullEntropyResult {
+            module_name,
+            entropy,
+        } => {
             let avg = if !entropy.is_empty() {
                 entropy.iter().sum::<f32>() / entropy.len() as f32
-            } else { 0.0 };
-            format!("Full entropy for '{}': avg {:.2} ({} chunks)", module_name, avg, entropy.len())
+            } else {
+                0.0
+            };
+            format!(
+                "Full entropy for '{}': avg {:.2} ({} chunks)",
+                module_name,
+                avg,
+                entropy.len()
+            )
         }
-        LogEvent::YaraMatch { rule_name, address, region_size, .. } => {
-            format!("🔍 YARA Match: {} @ {:#x} (size: {:#x})", rule_name, address, region_size)
+        LogEvent::YaraMatch {
+            rule_name,
+            address,
+            region_size,
+            ..
+        } => {
+            format!(
+                "🔍 YARA Match: {} @ {:#x} (size: {:#x})",
+                rule_name, address, region_size
+            )
         }
     }
 }

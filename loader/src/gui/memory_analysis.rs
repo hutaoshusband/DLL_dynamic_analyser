@@ -1,6 +1,6 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-use eframe::egui::{self, Ui, Color32, RichText};
+use eframe::egui::{self, Color32, RichText, Ui};
 
 use crate::app::state::AppState;
 use crate::core::injection;
@@ -15,7 +15,7 @@ pub enum MemoryViewMode {
 }
 
 pub fn render_memory_analysis_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppState) {
-    use egui_plot::{Line, Plot, PlotPoints, HLine};
+    use egui_plot::{HLine, Line, Plot, PlotPoints};
 
     let available_height = ui.available_height();
 

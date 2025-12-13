@@ -1,6 +1,5 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 pub mod logging;
 
 use serde::{Deserialize, Serialize};

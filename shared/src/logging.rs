@@ -1,6 +1,5 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -26,15 +25,40 @@ pub struct SectionInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "event_type", content = "details")]
 pub enum LogEvent {
-    Initialization { status: String },
-    Shutdown { status: String },
-    Error { source: String, message: String },
-    FileOperation { path: String, operation: String, details: String },
-    VmpSectionFound { module_path: String, section_name: String },
-    SectionList { sections: Vec<SectionInfo> },
-    SectionDump { name: String, data: Vec<u8> },
-    EntropyResult { name: String, entropy: Vec<f32> },
-    ModuleDump { module_name: String, data: Vec<u8> },
+    Initialization {
+        status: String,
+    },
+    Shutdown {
+        status: String,
+    },
+    Error {
+        source: String,
+        message: String,
+    },
+    FileOperation {
+        path: String,
+        operation: String,
+        details: String,
+    },
+    VmpSectionFound {
+        module_path: String,
+        section_name: String,
+    },
+    SectionList {
+        sections: Vec<SectionInfo>,
+    },
+    SectionDump {
+        name: String,
+        data: Vec<u8>,
+    },
+    EntropyResult {
+        name: String,
+        entropy: Vec<f32>,
+    },
+    ModuleDump {
+        module_name: String,
+        data: Vec<u8>,
+    },
     ApiHook {
         function_name: String,
         parameters: serde_json::Value,
@@ -47,20 +71,49 @@ pub enum LogEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         stack_trace: Option<Vec<String>>,
     },
-    ProcessEnumeration { function_name: String, parameters: serde_json::Value },
-    MemoryScan { status: String, result: String },
-    VmpTrace { message: String, details: serde_json::Value },
-    StaticAnalysis { finding: String, details: String },
-    StringDump { address: usize, value: String, encoding: String },
-    UnpackerActivity { source_address: usize, finding: String, details: String },
-    FullEntropyResult { module_name: String, entropy: Vec<f32> },
-    YaraMatch { rule_name: String, address: usize, region_size: usize, metadata: String },
+    ProcessEnumeration {
+        function_name: String,
+        parameters: serde_json::Value,
+    },
+    MemoryScan {
+        status: String,
+        result: String,
+    },
+    VmpTrace {
+        message: String,
+        details: serde_json::Value,
+    },
+    StaticAnalysis {
+        finding: String,
+        details: String,
+    },
+    StringDump {
+        address: usize,
+        value: String,
+        encoding: String,
+    },
+    UnpackerActivity {
+        source_address: usize,
+        finding: String,
+        details: String,
+    },
+    FullEntropyResult {
+        module_name: String,
+        entropy: Vec<f32>,
+    },
+    YaraMatch {
+        rule_name: String,
+        address: usize,
+        region_size: usize,
+        metadata: String,
+    },
     Message(String),
 }
 
 impl PartialEq for LogEvent {
     fn eq(&self, other: &Self) -> bool {
-        serde_json::to_string(self).unwrap_or_default() == serde_json::to_string(other).unwrap_or_default()
+        serde_json::to_string(self).unwrap_or_default()
+            == serde_json::to_string(other).unwrap_or_default()
     }
 }
 
@@ -91,7 +144,7 @@ impl LogEntry {
             timestamp: Utc::now(),
             level,
             process_id: 0, // Loader doesn't know this
-            thread_id: 0, // Loader doesn't know this
+            thread_id: 0,  // Loader doesn't know this
             suspicion_score: 0,
             event,
             stack_trace: None,

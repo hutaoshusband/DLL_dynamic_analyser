@@ -1,6 +1,5 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 extern crate embed_resource;
 
 fn main() {

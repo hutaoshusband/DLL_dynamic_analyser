@@ -1,10 +1,9 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 #![allow(dead_code, unused_variables)]
-use shared::logging::{LogLevel, LogEvent};
 use crate::{log_event, ReentrancyGuard};
 use patternscan::scan;
+use shared::logging::{LogEvent, LogLevel};
 use std::ffi::OsString;
 use std::io::Cursor;
 use std::os::windows::ffi::OsStringExt;
@@ -82,17 +81,13 @@ pub unsafe fn get_main_module_range() -> Option<&'static [u8]> {
     if dos_header.e_magic != 0x5A4D {
         return None;
     }
-    let nt_headers_ptr =
-        base_addr.add(dos_header.e_lfanew as usize) as *const IMAGE_NT_HEADERS64;
+    let nt_headers_ptr = base_addr.add(dos_header.e_lfanew as usize) as *const IMAGE_NT_HEADERS64;
     let nt_headers = &*nt_headers_ptr;
     if nt_headers.Signature != 0x4550 {
         return None;
     }
     let size_of_image = nt_headers.OptionalHeader.SizeOfImage;
-    Some(slice::from_raw_parts(
-        base_addr,
-        size_of_image as usize,
-    ))
+    Some(slice::from_raw_parts(base_addr, size_of_image as usize))
 }
 
 pub fn find_signature(signature: &str) -> Option<usize> {
@@ -145,9 +140,9 @@ pub fn scan_for_manual_mapping() {
                     ) != 0
                         && dos_header.e_magic == 0x5A4D
                     {
-                        let nt_header_address =
-                            (mem_info.BaseAddress as usize + dos_header.e_lfanew as usize)
-                                as *const _;
+                        let nt_header_address = (mem_info.BaseAddress as usize
+                            + dos_header.e_lfanew as usize)
+                            as *const _;
                         let mut nt_headers: IMAGE_NT_HEADERS64 = std::mem::zeroed();
                         if ReadProcessMemory(
                             process_handle,

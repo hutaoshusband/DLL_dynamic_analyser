@@ -1,8 +1,7 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
-use shared::logging::{LogLevel, LogEvent};
 use crate::log_event;
+use shared::logging::{LogEvent, LogLevel};
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Memory::{
@@ -39,13 +38,16 @@ pub fn monitor_code_modifications() {
                     &mut bytes_read,
                 ) != 0
                 {
-                    log_event(LogLevel::Warn, LogEvent::MemoryScan {
-                        status: "Suspicious Memory Region Found".to_string(),
-                        result: format!(
-                            "Address: {:#X}, Size: {}, Protection: {:#X}",
-                            mbi.BaseAddress as usize, mbi.RegionSize, mbi.Protect
-                        ),
-                    });
+                    log_event(
+                        LogLevel::Warn,
+                        LogEvent::MemoryScan {
+                            status: "Suspicious Memory Region Found".to_string(),
+                            result: format!(
+                                "Address: {:#X}, Size: {}, Protection: {:#X}",
+                                mbi.BaseAddress as usize, mbi.RegionSize, mbi.Protect
+                            ),
+                        },
+                    );
                 }
             }
 

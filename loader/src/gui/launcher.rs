@@ -9,7 +9,7 @@ use crate::app::state::AppState;
 use crate::core::analysis;
 
 use crate::app::state::ActiveTab;
-use eframe::egui::{Ui};
+use eframe::egui::Ui;
 
 pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppState) {
     let mut auto_inject_clicked = false;
@@ -44,9 +44,27 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                     egui::ComboBox::from_id_source("preset_selector")
                         .selected_text(selected_preset_text)
                         .show_ui(ui, |ui| {
-                            preset_changed |= ui.selectable_value(&mut state.selected_preset, Preset::Stealth, "Stealth").changed();
-                            preset_changed |= ui.selectable_value(&mut state.selected_preset, Preset::Balanced, "Balanced").changed();
-                            preset_changed |= ui.selectable_value(&mut state.selected_preset, Preset::Aggressive, "Aggressive").changed();
+                            preset_changed |= ui
+                                .selectable_value(
+                                    &mut state.selected_preset,
+                                    Preset::Stealth,
+                                    "Stealth",
+                                )
+                                .changed();
+                            preset_changed |= ui
+                                .selectable_value(
+                                    &mut state.selected_preset,
+                                    Preset::Balanced,
+                                    "Balanced",
+                                )
+                                .changed();
+                            preset_changed |= ui
+                                .selectable_value(
+                                    &mut state.selected_preset,
+                                    Preset::Aggressive,
+                                    "Aggressive",
+                                )
+                                .changed();
                         });
 
                     if preset_changed {
@@ -60,9 +78,16 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                     let is_running = state.is_process_running.load(Ordering::SeqCst);
                     let can_inject = !is_running && state.dll_path.is_some();
 
-                    if ui.add_enabled(can_inject, egui::Button::new("Inject")).clicked() {
+                    if ui
+                        .add_enabled(can_inject, egui::Button::new("Inject"))
+                        .clicked()
+                    {
                         let pid_to_use = state.manual_injection_pid.parse::<u32>().ok();
-                        let name_to_use = if pid_to_use.is_none() { Some(state.target_process_name.clone()) } else { None };
+                        let name_to_use = if pid_to_use.is_none() {
+                            Some(state.target_process_name.clone())
+                        } else {
+                            None
+                        };
 
                         if let Some(dll_path) = state.dll_path.clone() {
                             analysis::start_analysis_thread(
@@ -83,28 +108,45 @@ pub fn render_launcher_tab(_ctx: &egui::Context, ui: &mut Ui, state: &mut AppSta
                         }
                     }
 
-                    if ui.add_enabled(is_running, egui::Button::new("Terminate")).clicked() {
+                    if ui
+                        .add_enabled(is_running, egui::Button::new("Terminate"))
+                        .clicked()
+                    {
                         analysis::terminate_process(state.process_handle.clone());
                     }
 
-                    if ui.checkbox(&mut auto_inject_enabled, "Auto-Inject").clicked() {
+                    if ui
+                        .checkbox(&mut auto_inject_enabled, "Auto-Inject")
+                        .clicked()
+                    {
                         auto_inject_clicked = true;
                     }
 
-                    ui.checkbox(&mut state.use_manual_map, "Use Manual Map (Broken for now 11/12/2025)");
+                    ui.checkbox(
+                        &mut state.use_manual_map,
+                        "Use Manual Map (Broken for now 11/12/2025)",
+                    );
                 });
             });
         });
 
         ui.separator();
-        ui.label(format!("Status: {}", *state.injection_status.lock().unwrap()));
+        ui.label(format!(
+            "Status: {}",
+            *state.injection_status.lock().unwrap()
+        ));
         if state.dll_path.is_none() {
-            ui.colored_label(egui::Color32::RED, "client.dll not found in the application directory.");
+            ui.colored_label(
+                egui::Color32::RED,
+                "client.dll not found in the application directory.",
+            );
         }
     });
 
     if auto_inject_clicked {
-        state.auto_inject_enabled.store(auto_inject_enabled, Ordering::SeqCst);
+        state
+            .auto_inject_enabled
+            .store(auto_inject_enabled, Ordering::SeqCst);
         if auto_inject_enabled {
             analysis::start_auto_inject_thread(state);
         }

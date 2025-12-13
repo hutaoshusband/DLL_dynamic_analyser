@@ -5,11 +5,11 @@ use std::path::Path;
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("all_rules.yar");
-    
+
     let yara_dir = Path::new("..").join("yara");
-    
+
     let mut all_rules = String::new();
-    
+
     fn visit_dirs(dir: &Path, all_rules: &mut String) -> std::io::Result<()> {
         if dir.is_dir() {
             for entry in fs::read_dir(dir)? {
@@ -34,10 +34,13 @@ fn main() {
     if yara_dir.exists() {
         println!("cargo:rerun-if-changed={}", yara_dir.display());
         if let Err(e) = visit_dirs(&yara_dir, &mut all_rules) {
-             println!("cargo:warning=Failed to read YARA rules: {}", e);
+            println!("cargo:warning=Failed to read YARA rules: {}", e);
         }
     } else {
-        println!("cargo:warning=YARA directory not found at {}", yara_dir.display());
+        println!(
+            "cargo:warning=YARA directory not found at {}",
+            yara_dir.display()
+        );
     }
 
     if all_rules.is_empty() {

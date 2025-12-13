@@ -1,11 +1,13 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 #![allow(dead_code)]
 
 use once_cell::sync::Lazy;
 use shared::MonitorConfig;
-use std::sync::{atomic::{AtomicBool, Ordering}, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    RwLock,
+};
 
 pub struct Features {
     pub features: RwLock<MonitorConfig>,

@@ -1,14 +1,14 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::{log_event, ReentrancyGuard};
+use serde_json::json;
+use shared::logging::{LogEvent, LogLevel};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, GetThreadContext, SetThreadContext, CONTEXT, EXCEPTION_POINTERS,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentThread, GetCurrentProcessId};
-use crate::{log_event, ReentrancyGuard};
-use shared::logging::{LogLevel, LogEvent};
-use serde_json::json;
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThread};
 
 const EXCEPTION_SINGLE_STEP: u32 = 0x80000004;
 const CONTEXT_DEBUG_REGISTERS: u32 = 0x00100010; // amd64
@@ -33,10 +33,14 @@ pub fn install_hw_bp(address: usize, dr_index: u8) -> bool {
     }
 }
 
-unsafe fn apply_hw_bp_to_thread(thread: windows_sys::Win32::Foundation::HANDLE, address: usize, dr_index: u8) -> bool {
+unsafe fn apply_hw_bp_to_thread(
+    thread: windows_sys::Win32::Foundation::HANDLE,
+    address: usize,
+    dr_index: u8,
+) -> bool {
     let mut ctx: CONTEXT = std::mem::zeroed();
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-    
+
     if GetThreadContext(thread, &mut ctx) == 0 {
         return false;
     }
@@ -56,7 +60,7 @@ unsafe fn apply_hw_bp_to_thread(thread: windows_sys::Win32::Foundation::HANDLE, 
     if SetThreadContext(thread, &ctx) == 0 {
         return false;
     }
-    
+
     true
 }
 
@@ -72,10 +76,15 @@ pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION
         let exception_addr = record.ExceptionAddress as usize;
 
         let mut hit_index = None;
-        if exception_addr == DR0_HOOK.load(Ordering::SeqCst) { hit_index = Some(0); }
-        else if exception_addr == DR1_HOOK.load(Ordering::SeqCst) { hit_index = Some(1); }
-        else if exception_addr == DR2_HOOK.load(Ordering::SeqCst) { hit_index = Some(2); }
-        else if exception_addr == DR3_HOOK.load(Ordering::SeqCst) { hit_index = Some(3); }
+        if exception_addr == DR0_HOOK.load(Ordering::SeqCst) {
+            hit_index = Some(0);
+        } else if exception_addr == DR1_HOOK.load(Ordering::SeqCst) {
+            hit_index = Some(1);
+        } else if exception_addr == DR2_HOOK.load(Ordering::SeqCst) {
+            hit_index = Some(2);
+        } else if exception_addr == DR3_HOOK.load(Ordering::SeqCst) {
+            hit_index = Some(3);
+        }
 
         if let Some(index) = hit_index {
             if let Some(_guard) = ReentrancyGuard::new() {
@@ -106,68 +115,85 @@ pub unsafe extern "system" fn stealth_veh_handler(exception_info: *mut EXCEPTION
 pub unsafe fn initialize_stealth_hooks() {
     crate::crash_logger::log_init_step("Stealth hooks: Starting initialization");
     crate::crash_logger::log_hook("stealth_veh_handler", true, None, "Registering VEH handler");
-    
+
     let handle = AddVectoredExceptionHandler(1, Some(stealth_veh_handler));
     if handle.is_null() {
-        crate::crash_logger::log_hook("stealth_veh_handler", false, None, "VEH registration failed");
-        log_event(LogLevel::Error, LogEvent::Error { 
-            source: "StealthHooks".to_string(), 
-            message: "Failed to register VEH".to_string() 
-        });
+        crate::crash_logger::log_hook(
+            "stealth_veh_handler",
+            false,
+            None,
+            "VEH registration failed",
+        );
+        log_event(
+            LogLevel::Error,
+            LogEvent::Error {
+                source: "StealthHooks".to_string(),
+                message: "Failed to register VEH".to_string(),
+            },
+        );
         return;
     }
-    crate::crash_logger::log_hook("stealth_veh_handler", true, None, "VEH registered successfully");
+    crate::crash_logger::log_hook(
+        "stealth_veh_handler",
+        true,
+        None,
+        "VEH registered successfully",
+    );
 
     crate::crash_logger::log_init_step("Stealth hooks: Getting ntdll.dll handle");
     let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
-        widestring::U16CString::from_str("ntdll.dll").unwrap().as_ptr()
+        widestring::U16CString::from_str("ntdll.dll")
+            .unwrap()
+            .as_ptr(),
     );
-    
+
     if ntdll != 0 {
         crate::crash_logger::log_init_step(&format!("Stealth hooks: ntdll.dll at {:#x}", ntdll));
-        
+
         crate::crash_logger::log_init_step("Stealth hooks: Resolving NtQuerySystemInformation");
         let func_name = b"NtQuerySystemInformation\0";
-        if let Some(addr) = windows_sys::Win32::System::LibraryLoader::GetProcAddress(ntdll, func_name.as_ptr()) {
+        if let Some(addr) =
+            windows_sys::Win32::System::LibraryLoader::GetProcAddress(ntdll, func_name.as_ptr())
+        {
             crate::crash_logger::log_hook(
-                "NtQuerySystemInformation", 
-                true, 
-                Some(addr as usize), 
-                "Function resolved, applying HW BP to all threads"
+                "NtQuerySystemInformation",
+                true,
+                Some(addr as usize),
+                "Function resolved, applying HW BP to all threads",
             );
             apply_to_all_threads(addr as usize, 0);
             crate::crash_logger::log_hook(
-                "NtQuerySystemInformation", 
-                true, 
-                Some(addr as usize), 
-                "HW BP applied to all threads"
+                "NtQuerySystemInformation",
+                true,
+                Some(addr as usize),
+                "HW BP applied to all threads",
             );
         } else {
             crate::crash_logger::log_hook(
-                "NtQuerySystemInformation", 
-                false, 
-                None, 
-                "Failed to resolve function address"
+                "NtQuerySystemInformation",
+                false,
+                None,
+                "Failed to resolve function address",
             );
         }
     } else {
         crate::crash_logger::log_init_step("Stealth hooks: FAILED to get ntdll.dll handle!");
     }
-    
+
     crate::crash_logger::log_init_step("Stealth hooks: Initialization complete");
 }
 
 unsafe fn apply_to_all_threads(address: usize, dr_index: u8) {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows_sys::Win32::System::Threading::{OpenThread, THREAD_ALL_ACCESS};
 
     crate::crash_logger::log_init_step(&format!(
-        "Stealth hooks: apply_to_all_threads(addr={:#x}, dr={})", 
+        "Stealth hooks: apply_to_all_threads(addr={:#x}, dr={})",
         address, dr_index
     ));
-    
+
     let pid = GetCurrentProcessId();
     let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
@@ -180,7 +206,7 @@ unsafe fn apply_to_all_threads(address: usize, dr_index: u8) {
 
     let mut thread_count = 0;
     let mut success_count = 0;
-    
+
     if Thread32First(snapshot, &mut te) != 0 {
         loop {
             if te.th32OwnerProcessID == pid {
@@ -199,7 +225,7 @@ unsafe fn apply_to_all_threads(address: usize, dr_index: u8) {
         }
     }
     windows_sys::Win32::Foundation::CloseHandle(snapshot);
-    
+
     crate::crash_logger::log_init_step(&format!(
         "Stealth hooks: Applied HW BP to {}/{} threads",
         success_count, thread_count

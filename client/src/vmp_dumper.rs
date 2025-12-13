@@ -1,14 +1,13 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 #![allow(dead_code, unused_variables)]
 
-use shared::logging::{LogLevel, LogEvent};
 use crate::{log_event, SUSPICION_SCORE};
 use chrono::{DateTime, Utc};
-use std::sync::atomic::Ordering;
+use iced_x86::{Decoder, DecoderOptions, NasmFormatter};
 use once_cell::sync::Lazy;
 use serde_json::json;
+use shared::logging::{LogEvent, LogLevel};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{self, File};
@@ -16,19 +15,19 @@ use std::io::Write;
 use std::mem;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use iced_x86::{Decoder, DecoderOptions, NasmFormatter};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{MAX_PATH};
+use windows_sys::Win32::Foundation::MAX_PATH;
 use windows_sys::Win32::System::Diagnostics::Debug::{
     ReadProcessMemory, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
 };
-use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 use windows_sys::Win32::System::Memory::{
     PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess};
+use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_LOCAL_APPDATA};
 
 #[derive(Debug, Clone)]
@@ -153,7 +152,8 @@ fn analyze_unpacked_code(code: &[u8], base_address: usize) {
     let mut decoder = Decoder::with_ip(BITNESS, code, base_address as u64, DecoderOptions::NONE);
     let _formatter = NasmFormatter::new();
 
-    for instr in decoder.iter().take(10) { // Analyze first 10 instructions
+    for instr in decoder.iter().take(10) {
+        // Analyze first 10 instructions
         if instr.code() == iced_x86::Code::Popad {
             SUSPICION_SCORE.fetch_add(5, Ordering::Relaxed);
             log_event(
@@ -161,7 +161,10 @@ fn analyze_unpacked_code(code: &[u8], base_address: usize) {
                 LogEvent::UnpackerActivity {
                     source_address: instr.ip() as usize,
                     finding: "POPAD Instruction Found".to_string(),
-                    details: format!("Found 'popad' at {:#X}. This often signifies the end of an unpacker stub.", instr.ip()),
+                    details: format!(
+                        "Found 'popad' at {:#X}. This often signifies the end of an unpacker stub.",
+                        instr.ip()
+                    ),
                 },
             );
         }
@@ -307,8 +310,7 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
             return None;
         }
 
-        let section_header_addr =
-            nt_headers_addr + mem::size_of::<IMAGE_NT_HEADERS64>();
+        let section_header_addr = nt_headers_addr + mem::size_of::<IMAGE_NT_HEADERS64>();
         let number_of_sections = nt_headers.FileHeader.NumberOfSections;
 
         for i in 0..number_of_sections {
@@ -327,7 +329,10 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
                 log_event(
                     LogLevel::Debug,
                     LogEvent::VmpTrace {
-                        message: format!("Found VMProtect section: {}", section_name.trim_matches('\0')),
+                        message: format!(
+                            "Found VMProtect section: {}",
+                            section_name.trim_matches('\0')
+                        ),
                         details: json!({ "module_base": base_address }),
                     },
                 );
@@ -338,18 +343,26 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
                 log_event(
                     LogLevel::Debug,
                     LogEvent::VmpTrace {
-                        message: format!("Found Enigma section: {}", section_name.trim_matches('\0')),
+                        message: format!(
+                            "Found Enigma section: {}",
+                            section_name.trim_matches('\0')
+                        ),
                         details: json!({ "module_base": base_address }),
                     },
                 );
                 return Some(ProtectorType::Enigma);
             }
 
-            if section_name_clean.starts_with(".themida") || section_name_clean.starts_with(".winlice") {
+            if section_name_clean.starts_with(".themida")
+                || section_name_clean.starts_with(".winlice")
+            {
                 log_event(
                     LogLevel::Debug,
                     LogEvent::VmpTrace {
-                        message: format!("Found Themida/Winlicense section: {}", section_name.trim_matches('\0')),
+                        message: format!(
+                            "Found Themida/Winlicense section: {}",
+                            section_name.trim_matches('\0')
+                        ),
                         details: json!({ "module_base": base_address }),
                     },
                 );
@@ -360,8 +373,7 @@ fn detect_protector(base_address: usize) -> Option<ProtectorType> {
     None
 }
 
-fn analyze_and_dump_if_ready() {
-}
+fn analyze_and_dump_if_ready() {}
 
 fn dump_all_targets(reason: DumpReason) {
     let targets_to_dump: Vec<VmpTarget> = {
@@ -396,7 +408,10 @@ fn get_dump_path() -> Option<PathBuf> {
     unsafe {
         let mut path_buf = vec![0u16; MAX_PATH as usize];
         if SHGetFolderPathW(0, CSIDL_LOCAL_APPDATA as i32, 0, 0, path_buf.as_mut_ptr()) >= 0 {
-            let len = path_buf.iter().position(|&c| c == 0).unwrap_or(path_buf.len());
+            let len = path_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(path_buf.len());
             let appdata_path_os = std::ffi::OsString::from_wide(&path_buf[..len]);
             let mut dump_path = PathBuf::from(appdata_path_os);
             dump_path.push("cs2_monitor");
@@ -415,19 +430,25 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
 
     unsafe {
         let Ok(dos_header) = read_memory::<IMAGE_DOS_HEADER>(base_address) else {
-            log_event(LogLevel::Error, LogEvent::VmpTrace {
-                message: "Failed to read DOS header for dumping.".to_string(),
-                details: json!({ "base_address": base_address }),
-            });
+            log_event(
+                LogLevel::Error,
+                LogEvent::VmpTrace {
+                    message: "Failed to read DOS header for dumping.".to_string(),
+                    details: json!({ "base_address": base_address }),
+                },
+            );
             return;
         };
 
         let nt_headers_addr = base_address + dos_header.e_lfanew as usize;
         let Ok(nt_headers) = read_memory::<IMAGE_NT_HEADERS64>(nt_headers_addr) else {
-            log_event(LogLevel::Error, LogEvent::VmpTrace {
-                message: "Failed to read NT headers for dumping.".to_string(),
-                details: json!({ "nt_header_address": nt_headers_addr }),
-            });
+            log_event(
+                LogLevel::Error,
+                LogEvent::VmpTrace {
+                    message: "Failed to read NT headers for dumping.".to_string(),
+                    details: json!({ "nt_header_address": nt_headers_addr }),
+                },
+            );
             return;
         };
 
@@ -444,10 +465,13 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
             std::ptr::null_mut(),
         ) == 0
         {
-            log_event(LogLevel::Error, LogEvent::VmpTrace {
-                message: "Failed to read PE headers into buffer.".to_string(),
-                details: json!({ "base_address": base_address, "header_size": header_size }),
-            });
+            log_event(
+                LogLevel::Error,
+                LogEvent::VmpTrace {
+                    message: "Failed to read PE headers into buffer.".to_string(),
+                    details: json!({ "base_address": base_address, "header_size": header_size }),
+                },
+            );
             return;
         }
         file_buffer[..header_size].copy_from_slice(&headers_buffer);
@@ -469,10 +493,13 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
             let section_size = section_header.SizeOfRawData as usize;
 
             if section_file_offset + section_size > file_buffer.len() {
-                log_event(LogLevel::Warn, LogEvent::VmpTrace {
-                    message: "Section data extends beyond file buffer. Truncating.".to_string(),
-                    details: json!({ "section": i, "offset": section_file_offset, "size": section_size }),
-                });
+                log_event(
+                    LogLevel::Warn,
+                    LogEvent::VmpTrace {
+                        message: "Section data extends beyond file buffer. Truncating.".to_string(),
+                        details: json!({ "section": i, "offset": section_file_offset, "size": section_size }),
+                    },
+                );
                 continue;
             }
 
@@ -507,34 +534,46 @@ fn reconstruct_and_dump_pe(target: &VmpTarget, reason: &DumpReason) {
             .unwrap_or("unknown_module")
             .to_string();
 
-        let filename = format!("{}_{}_{}_{:#X}.dmp", module_file_name, protector_str, reason_str, base_address);
+        let filename = format!(
+            "{}_{}_{}_{:#X}.dmp",
+            module_file_name, protector_str, reason_str, base_address
+        );
         let full_path = dump_path.join(filename);
 
         match File::create(&full_path) {
             Ok(mut f) => {
                 if f.write_all(&file_buffer).is_ok() {
-                    log_event(LogLevel::Success, LogEvent::FileOperation {
-                        path: full_path.to_string_lossy().to_string(),
-                        operation: "PE Reconstruction".to_string(),
-                        details: format!(
-                            "Successfully dumped {} bytes from {}",
-                            file_size, target.module_name
-                        ),
-                    });
+                    log_event(
+                        LogLevel::Success,
+                        LogEvent::FileOperation {
+                            path: full_path.to_string_lossy().to_string(),
+                            operation: "PE Reconstruction".to_string(),
+                            details: format!(
+                                "Successfully dumped {} bytes from {}",
+                                file_size, target.module_name
+                            ),
+                        },
+                    );
                 } else {
-                    log_event(LogLevel::Error, LogEvent::FileOperation {
-                        path: full_path.to_string_lossy().to_string(),
-                        operation: "PE Reconst. Write".to_string(),
-                        details: "Failed to write dumped memory to file".to_string(),
-                    });
+                    log_event(
+                        LogLevel::Error,
+                        LogEvent::FileOperation {
+                            path: full_path.to_string_lossy().to_string(),
+                            operation: "PE Reconst. Write".to_string(),
+                            details: "Failed to write dumped memory to file".to_string(),
+                        },
+                    );
                 }
             }
             Err(e) => {
-                log_event(LogLevel::Error, LogEvent::FileOperation {
-                    path: full_path.to_string_lossy().to_string(),
-                    operation: "PE Reconst. Create".to_string(),
-                    details: e.to_string(),
-                });
+                log_event(
+                    LogLevel::Error,
+                    LogEvent::FileOperation {
+                        path: full_path.to_string_lossy().to_string(),
+                        operation: "PE Reconst. Create".to_string(),
+                        details: e.to_string(),
+                    },
+                );
             }
         }
     }

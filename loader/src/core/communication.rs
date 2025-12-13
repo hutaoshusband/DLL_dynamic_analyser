@@ -1,20 +1,18 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 use std::{
     sync::{mpsc::Sender, Arc, Mutex},
     thread,
     time::Duration,
 };
 use windows_sys::Win32::{
-    Foundation::{GetLastError, INVALID_HANDLE_VALUE, ERROR_PIPE_BUSY, ERROR_FILE_NOT_FOUND},
+    Foundation::{GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
-        CreateFileW, ReadFile, WriteFile, OPEN_EXISTING, FILE_GENERIC_READ,
-        FILE_GENERIC_WRITE,
+        CreateFileW, ReadFile, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
     },
 };
 
-use shared::{Command, MonitorConfig, get_commands_pipe_name, get_logs_pipe_name};
+use shared::{get_commands_pipe_name, get_logs_pipe_name, Command, MonitorConfig};
 use widestring::U16CString;
 
 pub fn start_pipe_log_listener(
@@ -69,7 +67,7 @@ fn connect_to_pipe(
     pipe_name: &str,
     access: u32,
     status_arc: &Arc<Mutex<String>>,
-    _logger: &Sender<String>,  // Kept for signature compatibility but not used here
+    _logger: &Sender<String>, // Kept for signature compatibility but not used here
 ) -> Option<isize> {
     let wide_pipe_name = U16CString::from_str(pipe_name).unwrap();
     const MAX_RETRIES: u32 = 60; // Increased to 30 seconds
@@ -124,13 +122,22 @@ pub fn connect_and_send_config(
     status_arc: Arc<Mutex<String>>,
     logger: Sender<String>,
 ) -> bool {
-    let commands_pipe_handle =
-        match connect_to_pipe(&get_commands_pipe_name(pid), FILE_GENERIC_WRITE, &status_arc, &logger) {
-            Some(handle) => handle,
-            None => return false,
-        };
+    let commands_pipe_handle = match connect_to_pipe(
+        &get_commands_pipe_name(pid),
+        FILE_GENERIC_WRITE,
+        &status_arc,
+        &logger,
+    ) {
+        Some(handle) => handle,
+        None => return false,
+    };
 
-    let logs_pipe_handle = match connect_to_pipe(&get_logs_pipe_name(pid), FILE_GENERIC_READ, &status_arc, &logger) {
+    let logs_pipe_handle = match connect_to_pipe(
+        &get_logs_pipe_name(pid),
+        FILE_GENERIC_READ,
+        &status_arc,
+        &logger,
+    ) {
         Some(handle) => handle,
         None => {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(commands_pipe_handle) };
@@ -151,8 +158,7 @@ pub fn connect_and_send_config(
     };
     let command_to_send = format!("{}\n", command_json);
     let bytes_to_send = command_to_send.as_bytes();
-    *status_arc.lock().unwrap() =
-        format!("Sending config ({} bytes)...", bytes_to_send.len());
+    *status_arc.lock().unwrap() = format!("Sending config ({} bytes)...", bytes_to_send.len());
 
     let mut bytes_written = 0;
     let success = unsafe {

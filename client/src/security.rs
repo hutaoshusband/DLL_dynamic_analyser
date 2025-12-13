@@ -1,13 +1,12 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 #![allow(dead_code, unused_variables)]
 use std::mem::zeroed;
+use widestring::U16CString;
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
-use widestring::U16CString;
 
 pub struct SecurityAttributes {
     pub attributes: SECURITY_ATTRIBUTES,

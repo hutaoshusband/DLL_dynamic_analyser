@@ -1,18 +1,17 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
+use crate::gui::memory_analysis::MemoryViewMode;
+use eframe::egui::{Color32, Pos2};
+use shared::{
+    logging::{LogEntry, LogEvent, LogLevel, SectionInfo},
+    MonitorConfig, Preset,
+};
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{atomic::AtomicBool, mpsc::Sender, Arc, Mutex},
     thread::JoinHandle,
 };
-use shared::{
-    logging::{LogEntry, LogEvent, LogLevel, SectionInfo},
-    MonitorConfig, Preset,
-};
-use eframe::egui::{Pos2, Color32};
-use crate::gui::memory_analysis::MemoryViewMode;
 pub const DLL_NAME: &str = "client.dll";
 
 #[derive(Clone, Debug)]
@@ -93,7 +92,6 @@ impl AppState {
             monitor_config.loader_path = path.to_string_lossy().to_string();
         }
 
-
         Self {
             target_process_name: "cs2.exe".to_owned(),
             manual_injection_pid: String::new(),
@@ -152,10 +150,19 @@ impl AppState {
                             .unwrap()
                             .insert(name.clone(), entropy.clone());
                     }
-                    LogEvent::FullEntropyResult { module_name, entropy } => {
-                        *self.full_entropy_results.lock().unwrap() = Some((module_name.clone(), entropy.clone()));
+                    LogEvent::FullEntropyResult {
+                        module_name,
+                        entropy,
+                    } => {
+                        *self.full_entropy_results.lock().unwrap() =
+                            Some((module_name.clone(), entropy.clone()));
                     }
-                    LogEvent::YaraMatch { rule_name, address, region_size, metadata } => {
+                    LogEvent::YaraMatch {
+                        rule_name,
+                        address,
+                        region_size,
+                        metadata,
+                    } => {
                         self.yara_matches.lock().unwrap().push(YaraMatchInfo {
                             rule_name: rule_name.clone(),
                             address: *address,

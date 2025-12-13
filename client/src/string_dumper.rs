@@ -1,16 +1,13 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 // for strings, which can reveal interesting information about a program's
-use shared::logging::{LogLevel, LogEvent};
 use crate::{log_event, ReentrancyGuard};
+use shared::logging::{LogEvent, LogLevel};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use windows_sys::Win32::System::Memory::{
-    VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT,
-};
+use windows_sys::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 const MIN_STRING_LEN: usize = 8; // Minimum length for a sequence of bytes to be considered a string.
@@ -39,9 +36,8 @@ fn scan_region_for_strings(
     }
 
     if region.len() >= MIN_STRING_LEN * 2 {
-        let u16_region: &[u16] = unsafe {
-            core::slice::from_raw_parts(region.as_ptr() as *const u16, region.len() / 2)
-        };
+        let u16_region: &[u16] =
+            unsafe { core::slice::from_raw_parts(region.as_ptr() as *const u16, region.len() / 2) };
         for window in u16_region.windows(MIN_STRING_LEN) {
             if window.iter().all(|&c| {
                 let ch = std::char::from_u32(c as u32).unwrap_or('\0');
@@ -86,13 +82,10 @@ fn string_dumper_main(found_strings: Arc<Mutex<HashSet<String>>>) {
 
         if mem_info.State == MEM_COMMIT {
             let region_data = unsafe {
-                std::slice::from_raw_parts(
-                    mem_info.BaseAddress as *const u8,
-                    mem_info.RegionSize,
-                )
+                std::slice::from_raw_parts(mem_info.BaseAddress as *const u8, mem_info.RegionSize)
             };
             if let Some(_guard) = ReentrancyGuard::new() {
-                 if let Ok(mut found) = found_strings.lock() {
+                if let Ok(mut found) = found_strings.lock() {
                     scan_region_for_strings(region_data, mem_info.BaseAddress as usize, &mut found);
                 }
             }
@@ -102,13 +95,14 @@ fn string_dumper_main(found_strings: Arc<Mutex<HashSet<String>>>) {
     }
 }
 
-
-
 pub fn start_string_dumper() {
-    log_event(LogLevel::Info, LogEvent::MemoryScan {
-        status: "Starting background string dumper...".to_string(),
-        result: "".to_string(),
-    });
+    log_event(
+        LogLevel::Info,
+        LogEvent::MemoryScan {
+            status: "Starting background string dumper...".to_string(),
+            result: "".to_string(),
+        },
+    );
 
     let found_strings = Arc::new(Mutex::new(HashSet::new()));
 

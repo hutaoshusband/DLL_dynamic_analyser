@@ -1,15 +1,14 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
-use std::{mem, path::Path, fs, env};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::windows::process::CommandExt;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fs, mem, path::Path};
 use widestring::{U16CString, U16String};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE, ERROR_NOT_ALL_ASSIGNED, LUID},
+    Foundation::{CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, INVALID_HANDLE_VALUE, LUID},
     Security::{
-        AdjustTokenPrivileges, LookupPrivilegeValueW,
-        SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+        AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     },
     System::{
         Diagnostics::ToolHelp::{
@@ -20,20 +19,24 @@ use windows_sys::Win32::{
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
         Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE},
         Threading::{
-            CreateRemoteThread, GetCurrentProcess, OpenProcess, OpenProcessToken,
-            PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE,
-            PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE, WaitForSingleObject,
-            GetExitCodeThread, IsWow64Process,
+            CreateRemoteThread, GetCurrentProcess, GetExitCodeThread, IsWow64Process, OpenProcess,
+            OpenProcessToken, WaitForSingleObject, PROCESS_CREATE_THREAD,
+            PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+            PROCESS_VM_WRITE,
         },
     },
 };
 
 use crate::app::state::ModuleInfo;
-use windows_sys::Win32::System::Diagnostics::Debug::{WriteProcessMemory, ReadProcessMemory};
-use pelite::pe64::{Pe, PeFile};
 use pelite::pe64::imports::Import;
-use windows_sys::Win32::System::Memory::{VirtualProtectEx, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READONLY};
-use windows_sys::Win32::System::SystemServices::{IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_ABSOLUTE};
+use pelite::pe64::{Pe, PeFile};
+use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
+use windows_sys::Win32::System::Memory::{
+    VirtualProtectEx, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READONLY,
+};
+use windows_sys::Win32::System::SystemServices::{
+    IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64, IMAGE_REL_BASED_HIGHLOW,
+};
 use windows_sys::Win32::System::Threading::GetProcessId;
 
 pub fn enable_debug_privilege() -> Result<(), String> {
@@ -75,7 +78,9 @@ pub fn enable_debug_privilege() -> Result<(), String> {
 
         if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
             CloseHandle(h_token);
-            return Err("AdjustTokenPrivileges: ERROR_NOT_ALL_ASSIGNED (Run as Admin?)".to_string());
+            return Err(
+                "AdjustTokenPrivileges: ERROR_NOT_ALL_ASSIGNED (Run as Admin?)".to_string(),
+            );
         }
 
         CloseHandle(h_token);
@@ -85,13 +90,16 @@ pub fn enable_debug_privilege() -> Result<(), String> {
 
 pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     if !dll_path.exists() {
-        return Err(format!("DLL file not found at path: {}", dll_path.display()));
+        return Err(format!(
+            "DLL file not found at path: {}",
+            dll_path.display()
+        ));
     }
-    
+
     if let Err(e) = enable_debug_privilege() {
         eprintln!("Warning: Failed to enable debug privilege: {}", e);
     }
-    
+
     let process_handle = unsafe {
         OpenProcess(
             PROCESS_CREATE_THREAD
@@ -113,27 +121,31 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
     unsafe {
         let mut is_wow64: i32 = 0;
         if IsWow64Process(process_handle, &mut is_wow64) != 0 && is_wow64 != 0 {
-             CloseHandle(process_handle);
-             return Err("Architecture Mismatch: Target process is 32-bit (WOW64), but this analyzer is 64-bit. Cannot inject 64-bit DLL into 32-bit process.".to_string());
+            CloseHandle(process_handle);
+            return Err("Architecture Mismatch: Target process is 32-bit (WOW64), but this analyzer is 64-bit. Cannot inject 64-bit DLL into 32-bit process.".to_string());
         }
     }
 
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let random_name = format!("analyzer_{}.dll", timestamp);
-    
+
     let public_dir = Path::new("C:\\Users\\Public");
     let temp_dll_path = if public_dir.exists() {
         public_dir.join(&random_name)
     } else {
         env::temp_dir().join(&random_name)
     };
-    
+
     let path_to_use = match fs::copy(dll_path, &temp_dll_path) {
-        Ok(_) => {
-            temp_dll_path.as_path()
-        }
+        Ok(_) => temp_dll_path.as_path(),
         Err(e) => {
-            eprintln!("Warning: Failed to copy DLL to public directory: {}. Trying original path.", e);
+            eprintln!(
+                "Warning: Failed to copy DLL to public directory: {}. Trying original path.",
+                e
+            );
             dll_path
         }
     };
@@ -163,7 +175,9 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
 
     if remote_buffer.is_null() {
         unsafe { CloseHandle(process_handle) };
-        return Err(format!("VirtualAllocEx failed: {}", unsafe { GetLastError() }));
+        return Err(format!("VirtualAllocEx failed: {}", unsafe {
+            GetLastError()
+        }));
     }
 
     let mut bytes_written = 0;
@@ -179,7 +193,9 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
 
     if write_success == 0 {
         unsafe { CloseHandle(process_handle) };
-        return Err(format!("WriteProcessMemory failed: {}", unsafe { GetLastError() }));
+        return Err(format!("WriteProcessMemory failed: {}", unsafe {
+            GetLastError()
+        }));
     }
 
     let kernel32_name = U16CString::from_str("kernel32.dll").unwrap();
@@ -209,20 +225,26 @@ pub fn inject_dll(pid: u32, dll_path: &Path) -> Result<isize, String> {
 
     if thread_handle == 0 {
         unsafe { CloseHandle(process_handle) };
-        return Err(format!("CreateRemoteThread failed: {}", unsafe { GetLastError() }));
+        return Err(format!("CreateRemoteThread failed: {}", unsafe {
+            GetLastError()
+        }));
     }
 
     let wait_result = unsafe { WaitForSingleObject(thread_handle, 5000) };
-    if wait_result == 0x00000000 { // WAIT_OBJECT_0
+    if wait_result == 0x00000000 {
+        // WAIT_OBJECT_0
         let mut exit_code = 0;
         unsafe { GetExitCodeThread(thread_handle, &mut exit_code) };
         if exit_code == 0 {
-             unsafe { CloseHandle(thread_handle) };
-             unsafe { CloseHandle(process_handle) };
-             return Err(format!("Injection failed: LoadLibraryW returned NULL in remote process.\nTarget PID: {}\nDLL Path: {}\n\nDIAGNOSTIC: Check if 'C:\\Users\\Public\\analyzer_beacon_{}.txt' exists. \nIf YES: DllMain ran but returned FALSE or crashed (panic caught).\nIf NO: LoadLibrary blocked by OS (AV/EDR/CFG/PPL).", pid, path_to_use.display(), pid));
+            unsafe { CloseHandle(thread_handle) };
+            unsafe { CloseHandle(process_handle) };
+            return Err(format!("Injection failed: LoadLibraryW returned NULL in remote process.\nTarget PID: {}\nDLL Path: {}\n\nDIAGNOSTIC: Check if 'C:\\Users\\Public\\analyzer_beacon_{}.txt' exists. \nIf YES: DllMain ran but returned FALSE or crashed (panic caught).\nIf NO: LoadLibrary blocked by OS (AV/EDR/CFG/PPL).", pid, path_to_use.display(), pid));
         }
     } else {
-        eprintln!("Warning: WaitForSingleObject on injection thread timed out or failed (0x{:X})", wait_result);
+        eprintln!(
+            "Warning: WaitForSingleObject on injection thread timed out or failed (0x{:X})",
+            wait_result
+        );
     }
 
     unsafe { CloseHandle(thread_handle) };
@@ -268,7 +290,8 @@ pub fn find_process_id(target_process_name: &str) -> Option<u32> {
 
 pub fn get_modules_for_process(pid: u32) -> Result<Vec<ModuleInfo>, String> {
     unsafe {
-        let snapshot_handle = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        let snapshot_handle =
+            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
         if snapshot_handle == INVALID_HANDLE_VALUE {
             return Err(format!(
                 "CreateToolhelp32Snapshot (Module) failed: {}",
@@ -335,8 +358,8 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
     unsafe {
         let mut is_wow64: i32 = 0;
         if IsWow64Process(process_handle, &mut is_wow64) != 0 && is_wow64 != 0 {
-             CloseHandle(process_handle);
-             return Err("Architecture Mismatch: Target process is 32-bit (WOW64). Manual Map x64 -> x86 not supported.".to_string());
+            CloseHandle(process_handle);
+            return Err("Architecture Mismatch: Target process is 32-bit (WOW64). Manual Map x64 -> x86 not supported.".to_string());
         }
     }
 
@@ -356,7 +379,10 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
 
     if remote_base.is_null() {
         unsafe { CloseHandle(process_handle) };
-        return Err(format!("VirtualAllocEx failed to allocate image size: {}", unsafe { GetLastError() }));
+        return Err(format!(
+            "VirtualAllocEx failed to allocate image size: {}",
+            unsafe { GetLastError() }
+        ));
     }
 
     let delta = (remote_base as u64).wrapping_sub(preferred_base);
@@ -377,13 +403,13 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         let section_va = remote_base as usize + section.VirtualAddress as usize;
         let size_of_raw_data = section.SizeOfRawData as usize;
         let pointer_to_raw_data = section.PointerToRawData as usize;
-        
+
         if size_of_raw_data == 0 {
             continue;
         }
 
         let data = &dll_bytes[pointer_to_raw_data..pointer_to_raw_data + size_of_raw_data];
-        
+
         unsafe {
             WriteProcessMemory(
                 process_handle,
@@ -406,23 +432,23 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
 
                     let mut current_val: u64 = 0;
                     unsafe {
-                         ReadProcessMemory(
+                        ReadProcessMemory(
                             process_handle,
                             target_va as _,
                             &mut current_val as *mut _ as _,
                             8,
-                             &mut bytes_written,
+                            &mut bytes_written,
                         );
                     }
-                    
+
                     match r_type {
                         r if r == IMAGE_REL_BASED_DIR64 as u8 => {
                             current_val = current_val.wrapping_add(delta);
                         }
-                         r if r == IMAGE_REL_BASED_HIGHLOW as u8 => {
-                             let mut val32 = current_val as u32;
-                             val32 = val32.wrapping_add(delta as u32);
-                             unsafe {
+                        r if r == IMAGE_REL_BASED_HIGHLOW as u8 => {
+                            let mut val32 = current_val as u32;
+                            val32 = val32.wrapping_add(delta as u32);
+                            unsafe {
                                 WriteProcessMemory(
                                     process_handle,
                                     target_va as _,
@@ -430,14 +456,14 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                                     4,
                                     &mut bytes_written,
                                 );
-                             }
-                             continue;
+                            }
+                            continue;
                         }
                         r if r == IMAGE_REL_BASED_ABSOLUTE as u8 => continue,
                         _ => continue,
                     }
 
-                     unsafe {
+                    unsafe {
                         WriteProcessMemory(
                             process_handle,
                             target_va as _,
@@ -445,7 +471,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                             8,
                             &mut bytes_written,
                         );
-                     }
+                    }
                 }
             }
         }
@@ -457,58 +483,85 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                 Ok(n) => n.to_string(),
                 Err(_) => continue,
             };
-            
+
             let module_handle_in_target = load_library_remote(process_handle, &module_name)?;
 
-            let int = match import_desc.int() { Ok(i) => i, Err(_) => continue };
+            let int = match import_desc.int() {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
             let iat_rva = import_desc.image().FirstThunk;
 
             for (i, import) in int.enumerate() {
-                 let import = match import { Ok(i) => i, Err(_) => continue };
-                 
-                 let func_addr = match import {
-                     Import::ByName { name, .. } => {
-                         let local_module = unsafe {
+                let import = match import {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+
+                let func_addr = match import {
+                    Import::ByName { name, .. } => {
+                        let local_module = unsafe {
                             let name_w = U16CString::from_str(&module_name).unwrap();
-                            let h = windows_sys::Win32::System::LibraryLoader::LoadLibraryW(name_w.as_ptr());
+                            let h = windows_sys::Win32::System::LibraryLoader::LoadLibraryW(
+                                name_w.as_ptr(),
+                            );
                             h
-                         };
-                         
-                         if local_module == 0 {
-                             unsafe { CloseHandle(process_handle) };
-                             return Err(format!("Could not load dependency locally: {}", module_name));
-                         }
+                        };
 
-                         let proc_name_c = std::ffi::CString::new(name.as_ref()).unwrap();
-                         let local_proc = unsafe { GetProcAddress(local_module, proc_name_c.as_ptr() as _) };
-                         
-                         if local_proc.is_none() {
-                              unsafe { CloseHandle(process_handle) };
-                              return Err(format!("Could not find procedure {} in {}", name, module_name));
-                         }
+                        if local_module == 0 {
+                            unsafe { CloseHandle(process_handle) };
+                            return Err(format!(
+                                "Could not load dependency locally: {}",
+                                module_name
+                            ));
+                        }
 
-                         let local_proc_addr = unsafe { std::mem::transmute::<Option<unsafe extern "system" fn() -> isize>, usize>(local_proc) };
-                         let offset = local_proc_addr - local_module as usize;
-                         module_handle_in_target as usize + offset
-                     }
-                     Import::ByOrdinal { ord: ordinal } => {
-                          let local_module = unsafe {
+                        let proc_name_c = std::ffi::CString::new(name.as_ref()).unwrap();
+                        let local_proc =
+                            unsafe { GetProcAddress(local_module, proc_name_c.as_ptr() as _) };
+
+                        if local_proc.is_none() {
+                            unsafe { CloseHandle(process_handle) };
+                            return Err(format!(
+                                "Could not find procedure {} in {}",
+                                name, module_name
+                            ));
+                        }
+
+                        let local_proc_addr = unsafe {
+                            std::mem::transmute::<Option<unsafe extern "system" fn() -> isize>, usize>(
+                                local_proc,
+                            )
+                        };
+                        let offset = local_proc_addr - local_module as usize;
+                        module_handle_in_target as usize + offset
+                    }
+                    Import::ByOrdinal { ord: ordinal } => {
+                        let local_module = unsafe {
                             let name_w = U16CString::from_str(&module_name).unwrap();
                             windows_sys::Win32::System::LibraryLoader::LoadLibraryW(name_w.as_ptr())
-                         };
-                         let local_proc = unsafe { GetProcAddress(local_module, (ordinal as u16) as *const u8) };
-                          if local_proc.is_none() {
-                              unsafe { CloseHandle(process_handle) };
-                              return Err(format!("Could not find procedure ordinal {} in {}", ordinal, module_name));
-                         }
-                         let local_proc_addr = unsafe { std::mem::transmute::<Option<unsafe extern "system" fn() -> isize>, usize>(local_proc) };
-                         let offset = local_proc_addr - local_module as usize;
-                         module_handle_in_target as usize + offset
-                     }
-                 };
-                 
-                 let iat_va = remote_base as usize + (iat_rva as usize) + (i * 8);
-                  unsafe {
+                        };
+                        let local_proc =
+                            unsafe { GetProcAddress(local_module, (ordinal as u16) as *const u8) };
+                        if local_proc.is_none() {
+                            unsafe { CloseHandle(process_handle) };
+                            return Err(format!(
+                                "Could not find procedure ordinal {} in {}",
+                                ordinal, module_name
+                            ));
+                        }
+                        let local_proc_addr = unsafe {
+                            std::mem::transmute::<Option<unsafe extern "system" fn() -> isize>, usize>(
+                                local_proc,
+                            )
+                        };
+                        let offset = local_proc_addr - local_module as usize;
+                        module_handle_in_target as usize + offset
+                    }
+                };
+
+                let iat_va = remote_base as usize + (iat_rva as usize) + (i * 8);
+                unsafe {
                     WriteProcessMemory(
                         process_handle,
                         iat_va as _,
@@ -516,29 +569,34 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                         8,
                         &mut bytes_written,
                     );
-                 }
+                }
             }
         }
     }
 
     for section in pe.section_headers() {
-        if section.SizeOfRawData == 0 { continue; }
-        
+        if section.SizeOfRawData == 0 {
+            continue;
+        }
+
         let section_va = remote_base as usize + section.VirtualAddress as usize;
         let characteristics = section.Characteristics;
-        
-        let protect = if characteristics & 0x20000000 != 0 { // MEM_EXECUTE
-            if characteristics & 0x80000000 != 0 { // MEM_WRITE
+
+        let protect = if characteristics & 0x20000000 != 0 {
+            // MEM_EXECUTE
+            if characteristics & 0x80000000 != 0 {
+                // MEM_WRITE
                 PAGE_EXECUTE_READWRITE
             } else {
                 PAGE_EXECUTE_READ
             }
-        } else if characteristics & 0x80000000 != 0 { // MEM_WRITE
-             PAGE_READWRITE
+        } else if characteristics & 0x80000000 != 0 {
+            // MEM_WRITE
+            PAGE_READWRITE
         } else {
-             PAGE_READONLY
+            PAGE_READONLY
         };
-        
+
         let mut old_protect = 0;
         unsafe {
             VirtualProtectEx(
@@ -546,7 +604,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
                 section_va as _,
                 section.SizeOfRawData as usize,
                 protect,
-                &mut old_protect
+                &mut old_protect,
             );
         }
     }
@@ -555,15 +613,15 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
     let dll_main_addr = remote_base as usize + entry_point as usize;
 
     let tls_callbacks_ptr = if let Ok(tls) = pe.tls() {
-         let callback_array_va = tls.image().AddressOfCallBacks;
-         if callback_array_va != 0 {
-             let relocated_array_ptr = (callback_array_va as i64 + delta as i64) as u64;
-             relocated_array_ptr
-         } else {
-             0
-         }
-    } else { 
-        0 
+        let callback_array_va = tls.image().AddressOfCallBacks;
+        if callback_array_va != 0 {
+            let relocated_array_ptr = (callback_array_va as i64 + delta as i64) as u64;
+            relocated_array_ptr
+        } else {
+            0
+        }
+    } else {
+        0
     };
 
     #[repr(C)]
@@ -572,19 +630,25 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
         dll_main: u64,
         tls_callbacks_ptr: u64,
     }
-    
+
     let sc_data = ShellcodeData {
         dll_base: remote_base as u64,
         dll_main: dll_main_addr as u64,
         tls_callbacks_ptr,
     };
-    
+
     let sc_data_size = std::mem::size_of::<ShellcodeData>();
     let sc_data_remote = unsafe {
-        VirtualAllocEx(process_handle, std::ptr::null(), sc_data_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        VirtualAllocEx(
+            process_handle,
+            std::ptr::null(),
+            sc_data_size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
     };
     unsafe {
-         WriteProcessMemory(
+        WriteProcessMemory(
             process_handle,
             sc_data_remote,
             &sc_data as *const _ as _,
@@ -592,62 +656,63 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
             &mut bytes_written,
         );
     }
-    
+
     //   BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
     let shellcode: [u8; _] = [
-        0x53,                               // push rbx
-        0x56,                               // push rsi
-        0x57,                               // push rdi
-        0x41, 0x54,                         // push r12
-        0x41, 0x55,                         // push r13
-        0x41, 0x56,                         // push r14
-        0x41, 0x57,                         // push r15
-        0x48, 0x83, 0xEC, 0x28,             // sub rsp, 0x28 (shadow space + alignment)
-        
-        0x48, 0x89, 0xCB,                   // mov rbx, rcx (rbx = &ShellcodeData)
-        0x4C, 0x8B, 0x23,                   // mov r12, [rbx] (r12 = dll_base)
+        0x53, // push rbx
+        0x56, // push rsi
+        0x57, // push rdi
+        0x41, 0x54, // push r12
+        0x41, 0x55, // push r13
+        0x41, 0x56, // push r14
+        0x41, 0x57, // push r15
+        0x48, 0x83, 0xEC, 0x28, // sub rsp, 0x28 (shadow space + alignment)
+        0x48, 0x89, 0xCB, // mov rbx, rcx (rbx = &ShellcodeData)
+        0x4C, 0x8B, 0x23, // mov r12, [rbx] (r12 = dll_base)
         0x41, 0xBD, 0x01, 0x00, 0x00, 0x00, // mov r13d, 1 (DLL_PROCESS_ATTACH)
-        0x4D, 0x31, 0xF6,                   // xor r14, r14 (r14 = NULL for lpvReserved)
-        
-        0x48, 0x8B, 0x73, 0x10,             // mov rsi, [rbx+0x10] (rsi = tls_callbacks_ptr)
-        0x48, 0x85, 0xF6,                   // test rsi, rsi
-        0x74, 0x18,                         // jz .call_dllmain (offset to dllmain code)
-        
-        0x48, 0x8B, 0x06,                   // mov rax, [rsi]
-        0x48, 0x85, 0xC0,                   // test rax, rax
-        0x74, 0x10,                         // jz .call_dllmain
-        0x4C, 0x89, 0xE1,                   // mov rcx, r12 (arg1 = dll_base)
-        0x4C, 0x89, 0xEA,                   // mov rdx, r13 (arg2 = 1)
-        0x4D, 0x89, 0xF0,                   // mov r8, r14 (arg3 = NULL)
-        0xFF, 0xD0,                         // call rax
-        0x48, 0x83, 0xC6, 0x08,             // add rsi, 8
-        0xEB, 0xE8,                         // jmp .tls_loop
-        
-        0x48, 0x8B, 0x43, 0x08,             // mov rax, [rbx+0x08] (rax = dll_main)
-        0x48, 0x85, 0xC0,                   // test rax, rax
-        0x74, 0x0B,                         // jz .done
-        0x4C, 0x89, 0xE1,                   // mov rcx, r12 (arg1 = dll_base)
-        0x4C, 0x89, 0xEA,                   // mov rdx, r13 (arg2 = 1)
-        0x4D, 0x89, 0xF0,                   // mov r8, r14 (arg3 = NULL)
-        0xFF, 0xD0,                         // call rax
-        
-        0x48, 0x83, 0xC4, 0x28,             // add rsp, 0x28
-        0x41, 0x5F,                         // pop r15
-        0x41, 0x5E,                         // pop r14
-        0x41, 0x5D,                         // pop r13
-        0x41, 0x5C,                         // pop r12
-        0x5F,                               // pop rdi
-        0x5E,                               // pop rsi
-        0x5B,                               // pop rbx
-        0xC3,                               // ret
+        0x4D, 0x31, 0xF6, // xor r14, r14 (r14 = NULL for lpvReserved)
+        0x48, 0x8B, 0x73, 0x10, // mov rsi, [rbx+0x10] (rsi = tls_callbacks_ptr)
+        0x48, 0x85, 0xF6, // test rsi, rsi
+        0x74, 0x18, // jz .call_dllmain (offset to dllmain code)
+        0x48, 0x8B, 0x06, // mov rax, [rsi]
+        0x48, 0x85, 0xC0, // test rax, rax
+        0x74, 0x10, // jz .call_dllmain
+        0x4C, 0x89, 0xE1, // mov rcx, r12 (arg1 = dll_base)
+        0x4C, 0x89, 0xEA, // mov rdx, r13 (arg2 = 1)
+        0x4D, 0x89, 0xF0, // mov r8, r14 (arg3 = NULL)
+        0xFF, 0xD0, // call rax
+        0x48, 0x83, 0xC6, 0x08, // add rsi, 8
+        0xEB, 0xE8, // jmp .tls_loop
+        0x48, 0x8B, 0x43, 0x08, // mov rax, [rbx+0x08] (rax = dll_main)
+        0x48, 0x85, 0xC0, // test rax, rax
+        0x74, 0x0B, // jz .done
+        0x4C, 0x89, 0xE1, // mov rcx, r12 (arg1 = dll_base)
+        0x4C, 0x89, 0xEA, // mov rdx, r13 (arg2 = 1)
+        0x4D, 0x89, 0xF0, // mov r8, r14 (arg3 = NULL)
+        0xFF, 0xD0, // call rax
+        0x48, 0x83, 0xC4, 0x28, // add rsp, 0x28
+        0x41, 0x5F, // pop r15
+        0x41, 0x5E, // pop r14
+        0x41, 0x5D, // pop r13
+        0x41, 0x5C, // pop r12
+        0x5F, // pop rdi
+        0x5E, // pop rsi
+        0x5B, // pop rbx
+        0xC3, // ret
     ];
 
     let shellcode_size = shellcode.len();
     let shellcode_remote = unsafe {
-        VirtualAllocEx(process_handle, std::ptr::null(), shellcode_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+        VirtualAllocEx(
+            process_handle,
+            std::ptr::null(),
+            shellcode_size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        )
     };
-     unsafe {
-         WriteProcessMemory(
+    unsafe {
+        WriteProcessMemory(
             process_handle,
             shellcode_remote,
             shellcode.as_ptr() as _,
@@ -655,7 +720,7 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
             &mut bytes_written,
         );
     }
-    
+
     let thread_handle = unsafe {
         CreateRemoteThread(
             process_handle,
@@ -669,89 +734,109 @@ pub fn manual_map_inject(pid: u32, dll_path: &Path) -> Result<isize, String> {
     };
 
     if thread_handle == 0 {
-         unsafe { CloseHandle(process_handle) };
-         return Err(format!("CreateRemoteThread for shellcode failed: {}", unsafe { GetLastError() }));
+        unsafe { CloseHandle(process_handle) };
+        return Err(format!(
+            "CreateRemoteThread for shellcode failed: {}",
+            unsafe { GetLastError() }
+        ));
     }
 
     unsafe { WaitForSingleObject(thread_handle, 5000) };
     unsafe { CloseHandle(thread_handle) };
-    
+
     Ok(process_handle)
 }
 
 fn resolve_api_set(dll_name: &str) -> String {
     let lower_name = dll_name.to_lowercase();
-    
+
     if lower_name.starts_with("api-ms-win-") || lower_name.starts_with("ext-ms-win-") {
-        if lower_name.contains("core-") || 
-           lower_name.contains("synch-") || 
-           lower_name.contains("processthreads-") ||
-           lower_name.contains("memory-") ||
-           lower_name.contains("handle-") ||
-           lower_name.contains("libraryloader-") ||
-           lower_name.contains("heap-") ||
-           lower_name.contains("interlocked-") ||
-           lower_name.contains("profile-") ||
-           lower_name.contains("string-") ||
-           lower_name.contains("sysinfo-") ||
-           lower_name.contains("errorhandling-") ||
-           lower_name.contains("fibers-") ||
-           lower_name.contains("namedpipe-") ||
-           lower_name.contains("file-") ||
-           lower_name.contains("console-") ||
-           lower_name.contains("timezone-") ||
-           lower_name.contains("localization-") {
+        if lower_name.contains("core-")
+            || lower_name.contains("synch-")
+            || lower_name.contains("processthreads-")
+            || lower_name.contains("memory-")
+            || lower_name.contains("handle-")
+            || lower_name.contains("libraryloader-")
+            || lower_name.contains("heap-")
+            || lower_name.contains("interlocked-")
+            || lower_name.contains("profile-")
+            || lower_name.contains("string-")
+            || lower_name.contains("sysinfo-")
+            || lower_name.contains("errorhandling-")
+            || lower_name.contains("fibers-")
+            || lower_name.contains("namedpipe-")
+            || lower_name.contains("file-")
+            || lower_name.contains("console-")
+            || lower_name.contains("timezone-")
+            || lower_name.contains("localization-")
+        {
             return "kernelbase.dll".to_string();
         }
-        
+
         if lower_name.contains("security-") {
             return "kernelbase.dll".to_string();
         }
-        
+
         if lower_name.contains("registry-") {
             return "kernelbase.dll".to_string();
         }
-        
+
         if lower_name.contains("com-") {
             return "combase.dll".to_string();
         }
-        
+
         return "kernelbase.dll".to_string();
     }
-    
+
     dll_name.to_string()
 }
 
-fn load_library_remote(process: windows_sys::Win32::Foundation::HANDLE, dll_name: &str) -> Result<isize, String> {
+fn load_library_remote(
+    process: windows_sys::Win32::Foundation::HANDLE,
+    dll_name: &str,
+) -> Result<isize, String> {
     unsafe {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-        
+
         let resolved_dll_name = resolve_api_set(dll_name);
-        
+
         let modules = get_modules_for_process(GetProcessId(process))?;
         for m in &modules {
             if m.name.eq_ignore_ascii_case(&resolved_dll_name) {
                 return Ok(m.base_address as isize);
             }
         }
-        
+
         let kernel32 = U16CString::from_str("kernel32.dll").unwrap();
         let load_lib_str = std::ffi::CString::new("LoadLibraryW").unwrap();
-        let load_library_addr = GetProcAddress(GetModuleHandleW(kernel32.as_ptr()), load_lib_str.as_ptr() as _);
-        
+        let load_library_addr = GetProcAddress(
+            GetModuleHandleW(kernel32.as_ptr()),
+            load_lib_str.as_ptr() as _,
+        );
+
         if load_library_addr.is_none() {
             return Err("Failed to find LoadLibraryW".to_string());
         }
 
         let dll_name_wide = U16CString::from_str(&resolved_dll_name).unwrap();
         let size = (dll_name_wide.len() + 1) * 2;
-        let remote_str = VirtualAllocEx(process, std::ptr::null(), size, MEM_COMMIT, PAGE_READWRITE);
+        let remote_str =
+            VirtualAllocEx(process, std::ptr::null(), size, MEM_COMMIT, PAGE_READWRITE);
         if remote_str.is_null() {
-            return Err(format!("Failed to allocate remote string for {}", resolved_dll_name));
+            return Err(format!(
+                "Failed to allocate remote string for {}",
+                resolved_dll_name
+            ));
         }
-        
-        WriteProcessMemory(process, remote_str, dll_name_wide.as_ptr() as _, size, std::ptr::null_mut());
-        
+
+        WriteProcessMemory(
+            process,
+            remote_str,
+            dll_name_wide.as_ptr() as _,
+            size,
+            std::ptr::null_mut(),
+        );
+
         let thread = CreateRemoteThread(
             process,
             std::ptr::null(),
@@ -759,30 +844,39 @@ fn load_library_remote(process: windows_sys::Win32::Foundation::HANDLE, dll_name
             Some(std::mem::transmute(load_library_addr)),
             remote_str,
             0,
-            std::ptr::null_mut()
+            std::ptr::null_mut(),
         );
-        
+
         if thread == 0 {
-            return Err(format!("Failed to create remote thread for loading {}", resolved_dll_name));
+            return Err(format!(
+                "Failed to create remote thread for loading {}",
+                resolved_dll_name
+            ));
         }
-        
+
         WaitForSingleObject(thread, 5000);
-        
+
         let mut exit_code = 0;
         GetExitCodeThread(thread, &mut exit_code);
         CloseHandle(thread);
-        
+
         if exit_code == 0 {
-            return Err(format!("LoadLibraryW returned NULL for {} (resolved from {})", resolved_dll_name, dll_name));
+            return Err(format!(
+                "LoadLibraryW returned NULL for {} (resolved from {})",
+                resolved_dll_name, dll_name
+            ));
         }
-        
+
         let modules = get_modules_for_process(GetProcessId(process))?;
         for m in modules {
             if m.name.eq_ignore_ascii_case(&resolved_dll_name) {
                 return Ok(m.base_address as isize);
             }
         }
-        
-        Err(format!("Could not load dependency: {} (resolved to {})", dll_name, resolved_dll_name))
+
+        Err(format!(
+            "Could not load dependency: {} (resolved to {})",
+            dll_name, resolved_dll_name
+        ))
     }
 }

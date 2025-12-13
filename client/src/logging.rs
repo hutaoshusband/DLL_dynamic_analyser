@@ -1,6 +1,5 @@
 // Copyright (c) 2024 HUTAOSHUSBAND - Wallbangbros.com/FireflyProtector.xyz
 
-
 #![allow(dead_code, unused_variables)]
 use crate::config::CONFIG;
 use crate::SUSPICION_SCORE;
@@ -9,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use shared::logging::{LogEntry, LogEvent, LogLevel};
 use std::ffi::c_void;
 use windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
-use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::System::Memory::{
-    VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_PRIVATE, MEM_MAPPED
+    VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 
 fn capture_stack_trace_internal(max_frames: usize) -> (Vec<String>, bool) {
     let mut back_trace: Vec<*mut c_void> = vec![std::ptr::null_mut(); max_frames];
@@ -56,13 +55,13 @@ fn is_address_suspicious(addr: usize) -> bool {
 
     if result != 0 {
         if (mbi.State & MEM_COMMIT) != 0 {
-             let is_private = (mbi.Type & MEM_PRIVATE) != 0;
-             let is_mapped = (mbi.Type & MEM_MAPPED) != 0;
-             let is_image = (mbi.Type & MEM_IMAGE) != 0;
+            let is_private = (mbi.Type & MEM_PRIVATE) != 0;
+            let is_mapped = (mbi.Type & MEM_MAPPED) != 0;
+            let is_image = (mbi.Type & MEM_IMAGE) != 0;
 
-             if is_private || (is_mapped && !is_image) {
-                 return true;
-             }
+            if is_private || (is_mapped && !is_image) {
+                return true;
+            }
         }
     }
     false
