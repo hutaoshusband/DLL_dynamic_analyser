@@ -109,8 +109,7 @@ impl eframe::App for App {
 
         self.frame_count += 1;
         if self.frame_count < 10 {
-            // Increased warmup to 10 frames to be safe
-            let start_w = 10.0; // Start REALLY small as requested ("fast nichts")
+            let start_w = 10.0;
             let start_h = 10.0;
             let center = target_final_rect.center();
             let start_pos = center - egui::vec2(start_w, start_h) / 2.0;
